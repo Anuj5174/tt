@@ -1,4 +1,5 @@
 import os, json, io, csv
+import numpy as np
 from datetime import datetime
 from pathlib import Path
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
@@ -6,12 +7,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
-from database import Base, engine, get_db, seed_database,Tiger, Capture, TriageRun, ReviewQueue, Alert, ChatMessage
+from database import Base, engine, get_db, seed_database,Tiger, Capture, TriageRun, ReviewQueue, Alert, ChatMessage, CameraStation
 from services.triage_service        import run_triage
 from services.identification_service import identify_tiger
 from services.geospatial_service    import get_tiger_home_ranges, get_territory_overlaps
 from services.alert_service         import run_alert_engine
 from services.chatbot               import ChatbotService, ChatRequest
+from services.ingest_service         import start_watcher, get_pending_cards, get_active_job, start_ingest
+from database import SessionLocal, IngestBatch
 
 # ── Bootstrap ──────────────────────────────────────────────────────────────────
 
@@ -44,6 +47,59 @@ def health_check():
 os.makedirs("data/images", exist_ok=True)
 os.makedirs("data/quarantined_blanks", exist_ok=True)
 app.mount("/images", StaticFiles(directory="data/images"), name="images")
+
+# Real PTR dataset (repo_root/data/PTR_Tiger_IDs_2025) served unmodified
+_REAL_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "PTR_Tiger_IDs_2025"))
+if os.path.isdir(_REAL_DIR):
+    app.mount("/real-images", StaticFiles(directory=_REAL_DIR), name="real-images")
+
+# SD-card watcher starts with the app; detection only — imports need UI confirmation
+start_watcher()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PART 0 — SD-CARD INGESTION
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/ingest/status")
+def ingest_status(db: Session = Depends(get_db)):
+    """Cards waiting for confirmation + current import progress + past batches."""
+    batches = db.query(IngestBatch).order_by(IngestBatch.started_at.desc()).limit(10).all()
+    return {
+        "pending_cards": get_pending_cards(),
+        "active_job": get_active_job(),
+        "recent_batches": [{
+            "id": b.id, "job_id": b.job_id, "station_id": b.station_id,
+            "started_at": b.started_at, "total_files": b.total_files,
+            "copied_files": b.copied_files, "skipped_duplicates": b.skipped_duplicates,
+            "blanks": b.blanks, "retained": b.retained, "saved_mb": b.saved_mb,
+        } for b in batches],
+    }
+
+@app.get("/api/ingest/stations")
+def ingest_station_list(db: Session = Depends(get_db)):
+    """Camera station dropdown for import confirmation."""
+    rows = db.query(Capture.station_id).distinct().all()
+    stations = sorted({r[0] for r in rows if r[0]})
+    return {"stations": stations}
+
+@app.get("/api/stations")
+def list_camera_stations(db: Session = Depends(get_db)):
+    """Real PTR camera locations (GRID survey) for station dropdowns and maps."""
+    stations = db.query(CameraStation).order_by(CameraStation.grid_id).all()
+    return [{
+        "station_id": s.station_id, "grid_id": s.grid_id,
+        "block": s.block, "beat": s.beat, "range": s.range_name,
+        "latitude": s.latitude, "longitude": s.longitude,
+    } for s in stations]
+
+@app.post("/api/ingest/start")
+def ingest_start(mount: str, station_id: str, db: Session = Depends(get_db)):
+    """Operator confirmed the card: copy -> triage -> identify in the background."""
+    try:
+        snapshot = start_ingest(mount, station_id, SessionLocal)
+        return snapshot
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
 # ══════════════════════════════════════════════════════════════════════════════
 # DASHBOARD SUMMARY
@@ -175,6 +231,230 @@ async def identify_image(file: UploadFile = File(...), db: Session = Depends(get
         print(f"[ERROR] /api/identify failed: {e}")
         raise HTTPException(status_code=500, detail="Identification failed. Please retry.")
 
+# ══════════════════════════════════════════════════════════════════════════════
+# UNIFIED DEMO PIPELINE — one upload, every stage, one response
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/api/pipeline/analyze")
+async def pipeline_analyze(file: UploadFile = File(...), station_id: str = "ST-01", db: Session = Depends(get_db)):
+    """
+    Full chain in one call for the unified demo page:
+    blank filter (MegaDetector) -> species gate (MobileNetV3) ->
+    stripe Re-ID (ResNet-18) -> classification into registered category.
+    Each stage's result is reported so the UI stepper mirrors real progress.
+    """
+    from uuid import uuid4
+    from fastapi.concurrency import run_in_threadpool
+    from services.identification_service import detect_crop, identify_tiger, load_models
+    from services.onnx_models import classifier_probs
+
+    MAX_UPLOAD_MB = 20
+    try:
+        contents = await file.read()
+        if not contents:
+            raise HTTPException(status_code=400, detail="Empty file")
+        if len(contents) > MAX_UPLOAD_MB * 1024 * 1024:
+            raise HTTPException(status_code=413, detail=f"Image larger than {MAX_UPLOAD_MB}MB")
+        try:
+            from PIL import Image
+            import io as _io
+            probe = Image.open(_io.BytesIO(contents))
+            probe.verify()
+        except Exception:
+            raise HTTPException(status_code=400, detail="File is not a valid image")
+
+        suffix = Path(file.filename or "upload.jpg").suffix.lower()
+        if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".bmp"}:
+            suffix = ".jpg"
+        os.makedirs("data/images/uploads", exist_ok=True)
+        image_path = f"data/images/uploads/{uuid4().hex}{suffix}"
+        with open(image_path, "wb") as f:
+            f.write(contents)
+
+        def _run_stages():
+            stages = {}
+            # Stage 1: blank filter
+            has_animal, detect_conf, cropped_path = detect_crop(image_path)
+            stages["blank_filter"] = {"has_animal": has_animal, "confidence": round(float(detect_conf), 3)}
+            if not has_animal:
+                final = {"outcome": "blank", "tiger_id": None, "name": None, "confidence": None, "review_item_id": None,
+                         "station_id": station_id, "capture_time": None}
+                return stages, final, image_path
+
+            # Stage 2: species gate — reported as INFORMATION only in this
+            # endpoint. The flank-trained MobileNetV3 misclassifies partial
+            # tiger views (head/tail shots common in PTR's curated folders),
+            # so it must not hard-reject here; MegaDetector already confirmed
+            # an animal at stage 1 and the Re-ID stage decides the outcome.
+            probs = classifier_probs(cropped_path)
+            tiger_prob = float(probs[0]) if probs else 0.0
+            stages["species_gate"] = {"tiger_probability": round(tiger_prob, 3), "is_tiger": tiger_prob >= 0.05}
+
+            # Stage 3+4: stripe Re-ID + category classification.
+            # PTR curated photos embed best as FULL images; raw scene photos
+            # (SD cards) embed best as detector CROPS — embed both, and score
+            # against every tiger centroid keeping the strongest cosine.
+            from services.identification_service import gallery_best_cosines
+            from services.onnx_models import reid_embedding
+
+            q_full = reid_embedding(image_path)
+            q_crop = reid_embedding(cropped_path)
+            queries = [q for q in (q_full, q_crop) if q is not None]
+            if not queries:
+                final = {"outcome": "new_tiger", "tiger_id": None, "name": None,
+                         "confidence": 0.0, "review_item_id": None,
+                         "station_id": station_id, "capture_time": None}
+                stages["stripe_reid"] = {"embedding_dim": 256, "top_similarity": 0.0}
+                stages["classification"] = {"category": "new_tiger", "tiger_id": None, "confidence": 0.0}
+                return stages, final, cropped_path
+
+            best_cos = None
+            gallery_ids = None
+            for q in queries:
+                cos, gallery_ids = gallery_best_cosines(q)
+                best_cos = cos if best_cos is None else np.maximum(best_cos, cos)
+
+            # Decision on RAW cosine + margin (stable as the gallery grows);
+            # softmax is computed only as a human-readable confidence display.
+            # Auto-match demands near-certain similarity: a wrong auto-label is
+            # far costlier for a ranger than a one-click review confirmation.
+            order = np.argsort(-best_cos)
+            top_i = int(order[0])
+            top_cos = float(best_cos[top_i])
+            second_cos = float(best_cos[order[1]]) if len(order) > 1 else 0.0
+            margin = top_cos - second_cos
+
+            temperature = 18.0
+            exp_sims = np.exp(best_cos * temperature)
+            conf_probs = exp_sims / np.sum(exp_sims)
+            prob_order = np.argsort(-conf_probs)[:6]
+            ranked = [{"tiger_id": gallery_ids[i], "confidence": round(float(conf_probs[i]), 3)} for i in prob_order]
+
+            top_id = gallery_ids[top_i]
+            if tiger_prob < 0.02 and top_cos < 0.55:
+                status = "not_a_tiger"
+            elif top_cos >= 0.86 and margin >= 0.08:
+                status = "auto_matched"
+            elif top_cos >= 0.55:
+                status = "ambiguous"
+            else:
+                status = "new_individual"
+            top_conf = round(float(conf_probs[top_i]), 3)
+            alt_id = ranked[1]["tiger_id"] if len(ranked) > 1 else None
+            alt_conf = ranked[1]["confidence"] if len(ranked) > 1 else 0.0
+            result = {
+                "status": status,
+                "top_match": {"tiger_id": top_id, "confidence": top_conf},
+                "alt_match": {"tiger_id": alt_id, "confidence": alt_conf},
+                "all_scores": ranked,
+            }
+            stages["stripe_reid"] = {
+                "embedding_dim": 256,
+                "top_similarity": round(top_cos, 3),
+                "margin": round(margin, 3),
+            }
+
+            outcome_map = {"auto_matched": "matched", "ambiguous": "review",
+                           "new_individual": "new_tiger", "not_a_tiger": "not_a_tiger"}
+            top = result.get("top_match") or {}
+            tiger = db.query(Tiger).filter(Tiger.tiger_id == top.get("tiger_id")).first() if top.get("tiger_id") else None
+
+            review_item_id = None
+            if status == "ambiguous":
+                from database import ReviewQueue
+                existing = db.query(ReviewQueue).filter(ReviewQueue.image_path == image_path,
+                                                         ReviewQueue.status == "pending").first()
+                if not existing:
+                    rq = ReviewQueue(
+                        image_path=image_path,
+                        station_id=station_id,
+                        timestamp=datetime.utcnow(),
+                        top_match_id=top_id,
+                        top_match_confidence=top_conf,
+                        alt_match_id=alt_id,
+                        alt_match_confidence=alt_conf,
+                        status="pending",
+                    )
+                    db.add(rq)
+                    db.flush()
+                    review_item_id = rq.id
+                else:
+                    review_item_id = existing.id
+
+            stages["classification"] = {"category": outcome_map.get(status, "new_tiger"),
+                                        "tiger_id": top.get("tiger_id"),
+                                        "confidence": round(float(top.get("confidence", 0)), 3)}
+
+            final = {
+                "outcome": outcome_map.get(status, "new_tiger"),
+                "tiger_id": top.get("tiger_id"),
+                "name": tiger.name if tiger else None,
+                "sex": tiger.sex if tiger else None,
+                "confidence": round(float(top.get("confidence", 0)), 3),
+                "review_item_id": review_item_id,
+                "all_scores": result.get("all_scores", []),
+            }
+
+            # PTR real-data filenames carry the camera GRID + EXIF timestamp:
+            # "<grid>_<flank>_<seq>__<frame>.JPG" -> auto-assign station/coords/time.
+            capture_station, capture_lat, capture_lon, capture_ts, grid_parsed = station_id, 21.78, 79.44, None, None
+            try:
+                import re as _re
+                from PIL import Image as _Image
+                _m = _re.match(r"^(\d+)_[A-Za-z]+_", os.path.basename(file.filename or ""))
+                if _m:
+                    _grid = int(_m.group(1))
+                    _st = db.query(CameraStation).filter(CameraStation.grid_id == _grid).first()
+                    if _st is not None:
+                        capture_station, capture_lat, capture_lon, grid_parsed = _st.station_id, _st.latitude, _st.longitude, _grid
+                _exif = _Image.open(image_path).getexif()
+                _raw = _exif.get(306)
+                if _raw:
+                    capture_ts = datetime.strptime(str(_raw), "%Y:%m:%d %H:%M:%S")
+            except Exception:
+                pass
+            if grid_parsed is not None:
+                stages["camera_match"] = {"grid_id": grid_parsed, "station_id": capture_station}
+            final["station_id"] = capture_station
+            final["capture_time"] = capture_ts.isoformat() if capture_ts else None
+
+            if status == "auto_matched" and tiger:
+                db.add(Capture(
+                    tiger_id=top["tiger_id"],
+                    image_path=image_path,
+                    station_id=capture_station,
+                    latitude=capture_lat, longitude=capture_lon,
+                    timestamp=capture_ts or datetime.utcnow(),
+                    confidence=top.get("confidence", 0.9),
+                    zone="core" if (21.72 <= capture_lat <= 21.88 and 79.35 <= capture_lon <= 79.52) else "buffer",
+                    flank_side="Unknown",
+                ))
+                tiger.total_captures = db.query(Capture).filter(Capture.tiger_id == top["tiger_id"]).count() + 1
+                db.commit()
+            return stages, final, cropped_path
+
+        load_models()
+        stages, final, kept_path = await run_in_threadpool(_run_stages)
+
+        # Clean up the original upload when a crop superseded it
+        if kept_path != image_path:
+            try:
+                os.remove(image_path)
+            except OSError:
+                pass
+
+        return {
+            "filename": file.filename,
+            "image_url": f"/images/{os.path.relpath(kept_path, 'data/images').replace(os.sep, '/')}",
+            "stages": stages,
+            "final": final,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[ERROR] /api/pipeline/analyze failed: {e}")
+        raise HTTPException(status_code=500, detail="Pipeline analysis failed. Please retry.")
+
 @app.get("/api/tigers")
 def list_tigers(db: Session = Depends(get_db)):
     tigers = db.query(Tiger).all()
@@ -250,8 +530,12 @@ def resolve_review(item_id: int, action: str, tiger_id: str = None, db: Session 
         item.status = "new_individual"
         new_id = tiger_id
         if not new_id:
-            count = db.query(Tiger).count()
-            new_id = f"PTR-T{count + 1:02d}"
+            # Next free numeric ID in the PTR convention (T103...T159)
+            existing = {t.tiger_id for t in db.query(Tiger.tiger_id).all()}
+            n = 100
+            while f"T{n}" in existing:
+                n += 1
+            new_id = f"T{n}"
         
         emb_256d = None
         if os.path.exists(item.image_path):
@@ -302,6 +586,36 @@ def resolve_review(item_id: int, action: str, tiger_id: str = None, db: Session 
 @app.get("/api/geospatial/home-ranges")
 def home_ranges(db: Session = Depends(get_db)):
     return get_tiger_home_ranges(db)
+
+@app.get("/api/geospatial/paths")
+def movement_paths(db: Session = Depends(get_db)):
+    """
+    Time-ordered movement path per tiger: every capture as a waypoint
+    (lat, lon, timestamp, station), sorted chronologically — the sequence
+    the tiger actually moved between camera stations.
+    """
+    tigers = {t.tiger_id: t for t in db.query(Tiger).all()}
+    captures = db.query(Capture).order_by(Capture.tiger_id, Capture.timestamp).all()
+
+    paths: dict[str, dict] = {}
+    for c in captures:
+        t = tigers.get(c.tiger_id)
+        if c.latitude is None or c.longitude is None:
+            continue
+        p = paths.setdefault(c.tiger_id, {
+            "tiger_id": c.tiger_id,
+            "name": t.name if t else c.tiger_id,
+            "sex": t.sex if t else None,
+            "points": [],
+        })
+        p["points"].append({
+            "lat": c.latitude,
+            "lon": c.longitude,
+            "timestamp": c.timestamp.isoformat() if c.timestamp else None,
+            "station_id": c.station_id,
+            "confidence": c.confidence,
+        })
+    return list(paths.values())
 
 @app.get("/api/geospatial/overlaps")
 def territory_overlaps(db: Session = Depends(get_db)):
@@ -383,16 +697,6 @@ def export_geospatial_csv(db: Session = Depends(get_db)):
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=pench_homeranges_report.csv"}
     )
-
-@app.post("/api/upload-video")
-async def upload_hero_video(file: UploadFile = File(...)):
-    """Upload a new hero/wildlife video from laptop."""
-    os.makedirs("../frontend/public", exist_ok=True)
-    destination = Path("../frontend/public/hero.mp4")
-    contents = await file.read()
-    with open(destination, "wb") as f:
-        f.write(contents)
-    return {"status": "success", "filename": file.filename, "size_mb": round(len(contents) / (1024 * 1024), 2)}
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PART 5 — CONSERVATION INTELLIGENCE CHATBOT

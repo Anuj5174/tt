@@ -1,31 +1,17 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
-import Image from "next/image";
+import { useState, useEffect, useRef } from "react";
 import LewaNav from "@/components/LewaNav";
+import SdCardImportPanel from "@/components/SdCardImportPanel";
+import { analyzePipeline, listTigers, getReviewQueue, getCameraStations } from "@/lib/api";
+import type { PipelineResult, CameraStationInfo } from "@/lib/api";
+import { tigerColor } from "@/lib/tigerColor";
+import { useLanguage } from "@/lib/i18n/LanguageContext";
 import {
-  Upload,
-  CheckCircle2,
-  AlertCircle,
-  HelpCircle,
-  PawPrint,
-  Sparkles,
-  ShieldCheck,
-  MapPin,
-  Clock,
-  Activity,
-  Film,
-  Video,
-  AlertTriangle,
+  Upload, Search, CheckCircle2, XCircle, Loader2, PawPrint,
+  Sparkles, AlertCircle, ChevronDown, ChevronUp, ArrowRight, RotateCcw, ScanSearch,
+  FolderOpen, Ban,
 } from "lucide-react";
-import {
-  identifyTiger,
-  listTigers,
-  getTiger,
-  getReviewQueue,
-  resolveReview,
-  uploadVideo,
-} from "@/lib/api";
 
 interface Tiger {
   tiger_id: string;
@@ -34,22 +20,6 @@ interface Tiger {
   total_captures: number;
   last_seen: string | null;
   last_station: string | null;
-}
-
-interface TigerDetail {
-  tiger_id: string;
-  name: string;
-  sex: string;
-  total_captures: number;
-  captures: Array<{
-    station_id: string;
-    timestamp: string;
-    zone: string;
-    image: string;
-    lat: number;
-    lon: number;
-    confidence: number;
-  }>;
 }
 
 interface ReviewItem {
@@ -63,1319 +33,593 @@ interface ReviewItem {
   alt_match_confidence: number;
 }
 
-interface IDResult {
-  status: string;
-  top_match: { tiger_id: string; confidence: number };
-  alt_match: { tiger_id: string; confidence: number };
-  all_scores: Array<{ tiger_id: string; confidence: number }>;
+interface BatchFileResult {
+  name: string;
+  outcome: string;
+  tiger: string | null;
+  conf: number | null;
 }
 
-const TIGER_CLASSIFICATION_NAMES: Record<string, string> = {
-  "PTR-T01": "Choti Tara",
-  "PTR-T02": "Baagh Raja",
-  "PTR-T03": "Kanha",
-  "PTR-T04": "Sundari",
-  "PTR-T05": "Shiv",
-  "PTR-T06": "Pari",
-};
+// (tiger colors are generated per-ID — see lib/tigerColor)
 
-const TIGER_COLORS: Record<string, string> = {
-  "PTR-T01": "#F97316",
-  "PTR-T02": "#3B82F6",
-  "PTR-T03": "#10B981",
-  "PTR-T04": "#A855F7",
-  "PTR-T05": "#F59E0B",
-  "PTR-T06": "#EF4444",
-};
-
-const TIGER_IMAGES: Record<string, string> = {
-  "PTR-T03": "/kanha-avatar.jpg",
-};
+// A stage lights up when the backend reports it (or once it is the current step)
+type StepState = "pending" | "active" | "done" | "skipped";
 
 export default function IdentificationPage() {
+  const { t, language } = useLanguage();
   const [tigers, setTigers] = useState<Tiger[]>([]);
-  const [selectedTigerId, setSelectedTigerId] = useState<string>("PTR-T01");
-  const [tigerDetail, setTigerDetail] = useState<TigerDetail | null>(null);
-  const [loadingDetail, setLoadingDetail] = useState<boolean>(false);
-
   const [queue, setQueue] = useState<ReviewItem[]>([]);
-  const [uploading, setUploading] = useState(false);
-  const [uploadedPreviewUrl, setUploadedPreviewUrl] = useState<string | null>(null);
-  const [uploadError, setUploadError] = useState<string | null>(null);
-  const [idResult, setIdResult] = useState<IDResult | null>(null);
+  const [showTigers, setShowTigers] = useState(false);
+  const [showQueue, setShowQueue] = useState(false);
+
+  // Upload flow
+  const [file, setFile] = useState<File | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
-  const [tab, setTab] = useState<"identify" | "tigers" | "review" | "video">("identify");
+  const [analyzing, setAnalyzing] = useState(false);
+  const [result, setResult] = useState<PipelineResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [steps, setSteps] = useState<Record<string, StepState>>({});
 
-  // Video Manager State
-  const [videoFile, setVideoFile] = useState<File | null>(null);
-  const [videoPreviewUrl, setVideoPreviewUrl] = useState<string | null>(null);
-  const [videoUploading, setVideoUploading] = useState(false);
-  const [videoSuccessMsg, setVideoSuccessMsg] = useState<string | null>(null);
-  const [videoErrorMsg, setVideoErrorMsg] = useState<string | null>(null);
-  const [videoDragOver, setVideoDragOver] = useState(false);
-  const videoInputRef = useRef<HTMLInputElement>(null);
-
-  const handleVideoSelect = (file: File) => {
-    if (!file.type.startsWith("video/")) {
-      setVideoErrorMsg("Please select a valid video file (.mp4, .webm, .mov)");
-      return;
-    }
-    setVideoErrorMsg(null);
-    setVideoFile(file);
-    setVideoPreviewUrl(URL.createObjectURL(file));
-  };
-
-  const handleVideoDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setVideoDragOver(false);
-    const file = e.dataTransfer.files[0];
-    if (file) handleVideoSelect(file);
-  };
-
-  const handleVideoUpload = async () => {
-    if (!videoFile) return;
-    setVideoUploading(true);
-    setVideoErrorMsg(null);
-    setVideoSuccessMsg(null);
-
-    try {
-      const res = await uploadVideo(videoFile);
-      setVideoSuccessMsg(`Video "${res.filename}" (${res.size_mb} MB) uploaded successfully and applied to background!`);
-    } catch (err: unknown) {
-      setVideoErrorMsg(err instanceof Error ? err.message : "Failed to upload video");
-    } finally {
-      setVideoUploading(false);
-    }
-  };
+  // Folder (batch) upload state
+  const [folderFiles, setFolderFiles] = useState<File[]>([]);
+  const [folderInputRef] = useState(() => ({ current: null as HTMLInputElement | null }));
+  const [batchRunning, setBatchRunning] = useState(false);
+  const [batchCancel, setBatchCancel] = useState(false);
+  const [batch, setBatch] = useState<{
+    processed: number; matched: number; review: number; newTiger: number;
+    notTiger: number; blank: number; errors: number; current: string; done: boolean;
+  } | null>(null);
+  const [batchResults, setBatchResults] = useState<BatchFileResult[]>([]);
+  const [stations, setStations] = useState<CameraStationInfo[]>([]);
+  const [batchStation, setBatchStation] = useState<string>("");
+  const batchCancelRef = useRef(false);
 
   useEffect(() => {
     listTigers().then(setTigers).catch(console.error);
     getReviewQueue().then(setQueue).catch(console.error);
+    getCameraStations().then(setStations).catch(console.error);
   }, []);
 
-  // Fetch capture log for selected tiger
-  useEffect(() => {
-    if (selectedTigerId) {
-      setLoadingDetail(true);
-      getTiger(selectedTigerId)
-        .then(setTigerDetail)
-        .catch(console.error)
-        .finally(() => setLoadingDetail(false));
+  const handleFileSelect = (f: File) => {
+    if (!f.type.startsWith("image/")) {
+      setError(language === "hi" ? "कृपया एक छवि फ़ाइल चुनें (JPG, PNG, WebP)" :
+              language === "mr" ? "कृपया प्रतिमा फाइल निवडा (JPG, PNG, WebP)" :
+              "Please select an image file (JPG, PNG, WebP)");
+      return;
     }
-  }, [selectedTigerId]);
+    setError(null);
+    setResult(null);
+    setFile(f);
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    setPreviewUrl(URL.createObjectURL(f));
+  };
 
-  const handleFile = useCallback(async (file: File) => {
-    setUploading(true);
-    setUploadError(null);
-    setIdResult(null);
-    setUploadedPreviewUrl(URL.createObjectURL(file));
+  const runAnalysis = async () => {
+    if (!file) return;
+    setAnalyzing(true);
+    setError(null);
+    setResult(null);
+    // Stepper: stage 1 activates immediately, later stages activate as results land
+    setSteps({ blank: "active", species: "pending", reid: "pending", result: "pending" });
     try {
-      const res = await identifyTiger(file);
-      setIdResult(res);
-      // Refresh review queue & tiger list if match was recorded
-      listTigers().then(setTigers).catch(console.error);
-      getReviewQueue().then(setQueue).catch(console.error);
-    } catch (e: unknown) {
-      console.error(e);
-      setUploadError(e instanceof Error ? e.message : "Unable to reach identification service. Please check your backend connection.");
+      const res = await analyzePipeline(file);
+      const s = res.stages;
+      const next: Record<string, StepState> = { blank: "done" };
+      if (s.blank_filter && !s.blank_filter.has_animal) {
+        next.species = "skipped"; next.reid = "skipped"; next.result = "skipped";
+      } else if (s.species_gate && !s.species_gate.is_tiger) {
+        next.species = "done"; next.reid = "skipped"; next.result = "skipped";
+      } else {
+        next.species = "done"; next.reid = "done"; next.result = "done";
+      }
+      setSteps(next);
+      setResult(res);
+      // Refresh counts behind the scenes
+      listTigers().then(setTigers).catch(() => {});
+      getReviewQueue().then(setQueue).catch(() => {});
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Analysis failed");
+      setSteps({});
     } finally {
-      setUploading(false);
+      setAnalyzing(false);
     }
-  }, []);
-
-  const handleDrop = useCallback(
-    (e: React.DragEvent) => {
-      e.preventDefault();
-      setDragOver(false);
-      const file = e.dataTransfer.files[0];
-      if (file) handleFile(file);
-    },
-    [handleFile]
-  );
-
-  const handleResolve = async (id: number, action: string) => {
-    await resolveReview(id, action);
-    setQueue((prev) => prev.filter((i) => i.id !== id));
   };
 
-  const statusConfig: Record<string, { color: string; icon: React.ReactNode; label: string }> = {
-    auto_matched: {
-      color: "var(--lewa-terracotta)",
-      icon: <CheckCircle2 size={20} />,
-      label: "Auto-Matched (High Confidence)",
-    },
-    ambiguous: {
-      color: "var(--lewa-amber)",
-      icon: <HelpCircle size={20} />,
-      label: "Ambiguous — Queued for Ranger Review",
-    },
-    new_individual: {
-      color: "var(--lewa-gold)",
-      icon: <Sparkles size={20} />,
-      label: "Potential New Individual Discovered",
-    },
-    not_a_tiger: {
-      color: "var(--lewa-muted)",
-      icon: <AlertCircle size={20} />,
-      label: "Non-Tiger Species Filtered",
-    },
+  const reset = () => {
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    setFile(null);
+    setPreviewUrl(null);
+    setResult(null);
+    setError(null);
+    setSteps({});
   };
+
+  // ── Folder (batch) processing: sequential analyze calls with live progress ──
+  const handleFolderSelect = (fileList: FileList | null) => {
+    if (!fileList) return;
+    const imgs = Array.from(fileList).filter((f) => f.type.startsWith("image/"));
+    setFolderFiles(imgs);
+    setBatchResults([]);
+    setBatch(null);
+    setBatchCancel(false);
+    batchCancelRef.current = false;
+  };
+
+  const runFolderBatch = async () => {
+    if (folderFiles.length === 0) return;
+    setBatchRunning(true);
+    setBatchCancel(false);
+    batchCancelRef.current = false;
+    setBatchResults([]);
+    setBatch({
+      processed: 0, matched: 0, review: 0, newTiger: 0,
+      notTiger: 0, blank: 0, errors: 0, current: "", done: false,
+    });
+    const counters = { matched: 0, review: 0, newTiger: 0, notTiger: 0, blank: 0, errors: 0 };
+    const results: BatchFileResult[] = [];
+
+    for (let i = 0; i < folderFiles.length; i++) {
+      if (batchCancelRef.current) break;
+      const f = folderFiles[i];
+      setBatch((b) => (b ? { ...b, current: f.name } : b));
+      try {
+        const res = await analyzePipeline(f, batchStation || "ST-01");
+        const outcome = res.final.outcome;
+        if (outcome === "matched") counters.matched++;
+        else if (outcome === "review") counters.review++;
+        else if (outcome === "new_tiger") counters.newTiger++;
+        else if (outcome === "not_a_tiger") counters.notTiger++;
+        else if (outcome === "blank") counters.blank++;
+        results.push({
+          name: f.name, outcome,
+          tiger: res.final.tiger_id, conf: res.final.confidence,
+        });
+      } catch {
+        counters.errors++;
+        results.push({ name: f.name, outcome: "error", tiger: null, conf: null });
+      }
+      setBatchResults([...results]);
+      setBatch((b) => (b ? { ...b, ...counters, processed: i + 1 } : b));
+    }
+
+    setBatch((b) => (b ? { ...b, done: true, current: "" } : b));
+    setBatchRunning(false);
+    // Refresh counts behind the scenes
+    listTigers().then(setTigers).catch(() => {});
+    getReviewQueue().then(setQueue).catch(() => {});
+  };
+
+  const resetFolder = () => {
+    setFolderFiles([]);
+    setBatch(null);
+    setBatchResults([]);
+    setBatchRunning(false);
+    setBatchCancel(false);
+    batchCancelRef.current = false;
+    if (folderInputRef.current) folderInputRef.current.value = "";
+  };
+
+  const outcomeMeta = (outcome: string) => {
+    switch (outcome) {
+      case "matched": return { label: t.unified_outcome_matched, color: "#10B981", icon: <CheckCircle2 size={22} /> };
+      case "review": return { label: t.unified_outcome_review, color: "#B87140", icon: <AlertCircle size={22} /> };
+      case "new_tiger": return { label: t.unified_outcome_new_tiger, color: "#A855F7", icon: <Sparkles size={22} /> };
+      case "not_a_tiger": return { label: t.unified_outcome_not_a_tiger, color: "#EF4444", icon: <XCircle size={22} /> };
+      default: return { label: t.unified_outcome_blank, color: "var(--lewa-muted)", icon: <ScanSearch size={22} /> };
+    }
+  };
+
+  const stepDefs = [
+    { key: "blank", label: t.unified_step_blank, desc: t.unified_step_blank_desc },
+    { key: "species", label: t.unified_step_species, desc: t.unified_step_species_desc },
+    { key: "reid", label: t.unified_step_reid, desc: t.unified_step_reid_desc },
+    { key: "result", label: t.unified_step_result, desc: t.unified_step_result_desc },
+  ];
+
+  const meta = result ? outcomeMeta(result.final.outcome) : null;
 
   return (
     <>
-      <LewaNav forceScrolled={true} />
+      <LewaNav />
 
-      <main
-        style={{
-          marginTop: "90px",
-          padding: "48px 6vw",
-          minHeight: "calc(100vh - 90px)",
-          background: "var(--lewa-cream)",
-          color: "var(--lewa-charcoal)",
-        }}
-      >
-        {/* Page Title Header */}
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "flex-start",
-            marginBottom: "36px",
-            flexWrap: "wrap",
-            gap: "20px",
-          }}
-        >
-          <div>
-            <div
-              style={{
-                fontSize: "11px",
-                letterSpacing: "2px",
-                textTransform: "uppercase",
-                color: "var(--lewa-terracotta)",
-                fontWeight: 700,
-                marginBottom: "8px",
-              }}
-            >
-              Part 2 · Computer Vision Pipeline
-            </div>
-            <h1 className="lewa-title-section" style={{ fontSize: "clamp(32px, 4vw, 52px)" }}>
-              Tiger <span className="font-italic">Identification</span> &amp; Re-ID
-            </h1>
-            <p style={{ color: "var(--lewa-body)", fontSize: "15px", marginTop: "8px", maxWidth: "700px" }}>
-              MobileNetV3 species gating combined with ResNet-18 256-dimensional flank stripe embedding vectors for high-precision individual recognition.
-            </p>
-          </div>
+      <main style={{ marginTop: "90px", padding: "60px 7vw", maxWidth: "980px", margin: "90px auto 0" }}>
+        <div style={{ textAlign: "center", marginBottom: "40px" }}>
+          <p style={{ fontSize: "11px", letterSpacing: "3px", textTransform: "uppercase", color: "var(--lewa-terracotta)", fontWeight: 700, marginBottom: "12px" }}>
+            {t.unified_badge}
+          </p>
+          <h1 className="lewa-title-section">{t.unified_title}</h1>
+          <p style={{ color: "var(--lewa-muted)", fontSize: "15px", maxWidth: "640px", margin: "16px auto 0" }}>
+            {t.unified_subtitle}
+          </p>
         </div>
 
-        {/* Navigation Tabs */}
-        <div style={{ display: "flex", gap: "12px", marginBottom: "36px", flexWrap: "wrap" }}>
-          {(["identify", "tigers", "review", "video"] as const).map((t) => (
-            <button
-              key={t}
-              onClick={() => setTab(t)}
-              style={{
-                padding: "10px 24px",
-                borderRadius: "40px",
-                border: "1px solid",
-                borderColor: tab === t ? "var(--lewa-terracotta)" : "var(--lewa-border)",
-                background: tab === t ? "var(--lewa-terracotta)" : "transparent",
-                color: tab === t ? "#fff" : "var(--lewa-charcoal)",
-                fontSize: "12px",
-                fontWeight: 700,
-                letterSpacing: "1.5px",
-                textTransform: "uppercase",
-                cursor: "pointer",
-                transition: "all 0.3s ease",
-                boxShadow: tab === t ? "0 4px 14px rgba(184, 71, 40, 0.3)" : "none",
-              }}
-            >
-              {t === "identify" && "Flank Image Re-ID"}
-              {t === "tigers" && `Registered Tigers (${tigers.length})`}
-              {t === "review" && `Review Queue (${queue.length})`}
-              {t === "video" && "Video Manager"}
-            </button>
-          ))}
-        </div>
-
-        {/* TAB 1: IDENTIFY FLANK IMAGE */}
-        {tab === "identify" && (
-          <div style={{ maxWidth: "900px" }}>
-            <div
-              className={`lewa-dropzone ${dragOver ? "dragging" : ""}`}
-              onDragOver={(e) => {
-                e.preventDefault();
-                setDragOver(true);
-              }}
-              onDragLeave={() => setDragOver(false)}
-              onDrop={handleDrop}
-              onClick={() => {
-                const input = document.createElement("input");
-                input.type = "file";
-                input.accept = "image/*";
-                input.onchange = (e) => {
-                  const f = (e.target as HTMLInputElement).files?.[0];
-                  if (f) handleFile(f);
-                };
-                input.click();
-              }}
-              style={{
-                background: "#ffffff",
-                border: dragOver ? "2px dashed var(--lewa-terracotta)" : "2px dashed rgba(200, 82, 32, 0.35)",
-                borderRadius: "20px",
-                padding: "64px 32px",
-                textAlign: "center",
-                cursor: "pointer",
-                boxShadow: dragOver ? "0 12px 36px rgba(200, 82, 32, 0.12)" : "0 8px 30px rgba(28,23,18,0.04)",
-                transition: "all 0.3s ease",
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                justifyContent: "center",
-              }}
-            >
-              {uploading ? (
-                <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
-                  <div
-                    style={{
-                      width: "56px",
-                      height: "56px",
-                      borderRadius: "50%",
-                      border: "3px solid var(--lewa-border)",
-                      borderTopColor: "var(--lewa-terracotta)",
-                      animation: "spin 0.8s linear infinite",
-                      margin: "0 auto 20px",
-                    }}
-                  />
-                  <p style={{ color: "var(--lewa-charcoal)", fontWeight: 700, fontSize: "17px", margin: "0 0 6px" }}>
-                    Extracting Flank Stripe Biometrics...
+        {/* ── Upload / Preview / Confirm ─────────────────────────────── */}
+        {!result && !analyzing && (
+          <div
+            className={`lewa-dropzone ${dragOver ? "dragging" : ""}`}
+            onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={(e) => { e.preventDefault(); setDragOver(false); const f = e.dataTransfer.files?.[0]; if (f) handleFileSelect(f); }}
+            onClick={() => inputRef.current?.click()}
+            style={{
+              background: previewUrl ? "#fff" : "var(--lewa-cream)",
+              border: "1.5px dashed #cbbfae",
+              borderRadius: "14px",
+              padding: previewUrl ? "24px" : "56px 24px",
+              textAlign: "center",
+              cursor: "pointer",
+              marginBottom: "20px",
+              position: "relative",
+              display: previewUrl ? "flex" : "block",
+              gap: "24px",
+              alignItems: "center",
+              justifyContent: previewUrl ? "flex-start" : "center",
+              flexWrap: "wrap",
+            }}
+          >
+            <input
+              ref={inputRef}
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+              hidden
+              onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFileSelect(f); }}
+            />
+            {!previewUrl ? (
+              <>
+                <Upload size={36} style={{ margin: "0 auto 14px", color: "var(--lewa-terracotta)" }} />
+                <h3 style={{ fontFamily: "var(--font-serif)", fontSize: "20px", marginBottom: "6px" }}>{t.unified_upload_title}</h3>
+                <p style={{ color: "var(--lewa-muted)", fontSize: "14px" }}>{t.unified_upload_desc}</p>
+                <p style={{ color: "var(--lewa-muted)", fontSize: "11px", letterSpacing: "2px", marginTop: "14px" }}>{t.unified_upload_hint}</p>
+              </>
+            ) : (
+              <>
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={previewUrl}
+                  alt="upload preview"
+                  style={{ width: "220px", height: "220px", objectFit: "cover", borderRadius: "10px" }}
+                />
+                <div style={{ flex: 1, minWidth: "220px" }}>
+                  <p style={{ fontWeight: 600, fontSize: "14px", color: "var(--lewa-charcoal)", marginBottom: "16px", wordBreak: "break-all" }}>
+                    {file?.name} ({file ? (file.size / 1024 / 1024).toFixed(1) : 0} MB)
                   </p>
-                  <p style={{ color: "var(--lewa-muted)", fontSize: "13px", margin: 0 }}>
-                    Generating 256-dimensional embedding vector via ResNet-18
-                  </p>
+                  <button
+                    className="btn-brush"
+                    style={{ display: "inline-flex", alignItems: "center", gap: "8px" }}
+                    onClick={async (e) => { e.stopPropagation(); await runAnalysis(); }}
+                  >
+                    <Search size={13} /> {t.unified_confirm_button}
+                  </button>
                 </div>
-              ) : (
-                <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
-                  {/* Glowing Circular Icon Container */}
-                  <div
-                    style={{
-                      width: "76px",
-                      height: "76px",
-                      borderRadius: "50%",
-                      background: "rgba(200, 82, 32, 0.08)",
-                      border: "1.5px solid rgba(200, 82, 32, 0.25)",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      marginBottom: "20px",
-                      boxShadow: "0 6px 20px rgba(200, 82, 32, 0.08)",
-                    }}
-                  >
-                    <Upload
-                      size={32}
-                      style={{ color: "var(--lewa-terracotta)", display: "block" }}
-                    />
-                  </div>
-
-                  <h3
-                    style={{
-                      fontFamily: "var(--font-serif)",
-                      fontSize: "24px",
-                      fontWeight: 600,
-                      color: "var(--lewa-charcoal)",
-                      margin: "0 0 8px",
-                    }}
-                  >
-                    Upload a tiger flank image
-                  </h3>
-                  <p
-                    style={{
-                      color: "var(--lewa-muted)",
-                      fontSize: "14px",
-                      maxWidth: "480px",
-                      margin: "0 auto 16px",
-                      lineHeight: "1.6",
-                    }}
-                  >
-                    Drag &amp; drop a cropped flank capture, or click to browse files from your computer.
-                  </p>
-
-                  <div
-                    style={{
-                      display: "inline-flex",
-                      gap: "8px",
-                      alignItems: "center",
-                    }}
-                  >
-                    <span
-                      style={{
-                        fontSize: "11px",
-                        fontWeight: 700,
-                        letterSpacing: "1px",
-                        textTransform: "uppercase",
-                        background: "var(--lewa-paper)",
-                        border: "1px solid var(--lewa-border)",
-                        padding: "4px 12px",
-                        borderRadius: "20px",
-                        color: "var(--lewa-muted)",
-                      }}
-                    >
-                      JPG · PNG · WebP
-                    </span>
-                    <span
-                      style={{
-                        fontSize: "11px",
-                        fontWeight: 700,
-                        letterSpacing: "1px",
-                        textTransform: "uppercase",
-                        background: "rgba(16, 185, 129, 0.08)",
-                        border: "1px solid rgba(16, 185, 129, 0.3)",
-                        padding: "4px 12px",
-                        borderRadius: "20px",
-                        color: "#10b981",
-                      }}
-                    >
-                      Automated Stripe Matching
-                    </span>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Upload Error Banner */}
-            {uploadError && (
-              <div
-                style={{
-                  marginTop: "20px",
-                  background: "rgba(239, 68, 68, 0.08)",
-                  border: "1px solid rgba(239, 68, 68, 0.3)",
-                  borderRadius: "12px",
-                  padding: "16px 20px",
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "12px",
-                  color: "#dc2626",
-                }}
-              >
-                <AlertCircle size={20} style={{ flexShrink: 0 }} />
-                <span style={{ fontSize: "14px", fontWeight: 500 }}>{uploadError}</span>
-              </div>
-            )}
-
-            {/* Inference Results Card */}
-            {idResult && (
-              <div
-                style={{
-                  marginTop: "32px",
-                  background: "#fff",
-                  borderRadius: "16px",
-                  padding: "32px",
-                  boxShadow: "0 8px 30px rgba(28,23,18,0.06)",
-                  border: "1px solid var(--lewa-border)",
-                }}
-              >
-                {/* Result Header Badge */}
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "12px",
-                    marginBottom: "24px",
-                    paddingBottom: "16px",
-                    borderBottom: "1px solid var(--lewa-border-subtle)",
-                    color: statusConfig[idResult.status]?.color || "var(--lewa-charcoal)",
-                  }}
-                >
-                  {statusConfig[idResult.status]?.icon}
-                  <span style={{ fontFamily: "var(--font-serif)", fontSize: "20px", fontWeight: 600 }}>
-                    {statusConfig[idResult.status]?.label}
-                  </span>
-                </div>
-
-                {/* If Not a Tiger */}
-                {idResult.status === "not_a_tiger" ? (
-                  <div
-                    style={{
-                      background: "var(--lewa-ivory)",
-                      borderRadius: "12px",
-                      padding: "28px",
-                      border: "1px solid var(--lewa-border)",
-                      textAlign: "center",
-                    }}
-                  >
-                    <AlertTriangle size={36} style={{ color: "var(--lewa-amber)", marginBottom: "12px" }} />
-                    <h3 style={{ fontFamily: "var(--font-serif)", fontSize: "20px", marginBottom: "8px" }}>
-                      Species Gate: Non-Tiger Capture Filtered
-                    </h3>
-                    <p style={{ color: "var(--lewa-muted)", fontSize: "14px", maxWidth: "600px", margin: "0 auto 16px" }}>
-                      The MobileNetV3 species classifier determined this image does not contain an Indian Tiger (<span className="font-italic">Panthera tigris</span>) or is an un-cropped habitat frame. ResNet-18 stripe extraction was bypassed.
-                    </p>
-                    {uploadedPreviewUrl && (
-                      <div style={{ marginTop: "16px", display: "inline-block" }}>
-                        <img
-                          src={uploadedPreviewUrl}
-                          alt="Uploaded capture"
-                          style={{
-                            maxWidth: "280px",
-                            maxHeight: "180px",
-                            borderRadius: "8px",
-                            objectFit: "cover",
-                            border: "1px solid var(--lewa-border)",
-                          }}
-                        />
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <>
-                    {/* Visual Comparison Grid */}
-                    {uploadedPreviewUrl && (
-                      <div
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: "20px",
-                          background: "var(--lewa-paper)",
-                          borderRadius: "12px",
-                          padding: "16px 20px",
-                          marginBottom: "24px",
-                          border: "1px solid var(--lewa-border)",
-                          flexWrap: "wrap",
-                        }}
-                      >
-                        <img
-                          src={uploadedPreviewUrl}
-                          alt="Uploaded flank query"
-                          style={{
-                            width: "90px",
-                            height: "90px",
-                            borderRadius: "8px",
-                            objectFit: "cover",
-                            border: "2px solid var(--lewa-terracotta)",
-                          }}
-                        />
-                        <div>
-                          <div style={{ fontSize: "11px", letterSpacing: "1px", textTransform: "uppercase", color: "var(--lewa-terracotta)", fontWeight: 700 }}>
-                            Query Image Uploaded
-                          </div>
-                          <div style={{ fontSize: "15px", fontWeight: 600, marginTop: "2px" }}>
-                            256-D ResNet-18 Embedding Extracted &amp; Matched
-                          </div>
-                          <div style={{ fontSize: "12px", color: "var(--lewa-muted)", marginTop: "2px" }}>
-                            Pench Gallery Comparison: {idResult.top_match.tiger_id} ({TIGER_CLASSIFICATION_NAMES[idResult.top_match.tiger_id] || "Registered Tiger"})
-                          </div>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Top Match & Alt Match Grid */}
-                    <div
-                      style={{
-                        display: "grid",
-                        gridTemplateColumns: "1fr 1fr",
-                        gap: "20px",
-                        marginBottom: "32px",
-                      }}
-                    >
-                  {/* Top Match Card */}
-                  <div
-                    style={{
-                      background: "var(--lewa-ivory)",
-                      borderRadius: "12px",
-                      padding: "24px",
-                      border: "1px solid var(--lewa-border)",
-                    }}
-                  >
-                    <div
-                      style={{
-                        fontSize: "11px",
-                        letterSpacing: "1.5px",
-                        textTransform: "uppercase",
-                        color: "var(--lewa-terracotta)",
-                        fontWeight: 700,
-                        marginBottom: "8px",
-                      }}
-                    >
-                      Top Match Class
-                    </div>
-                    <div style={{ fontFamily: "var(--font-serif)", fontSize: "26px", fontWeight: 700 }}>
-                      {TIGER_CLASSIFICATION_NAMES[idResult.top_match.tiger_id] || idResult.top_match.tiger_id}
-                    </div>
-                    <div style={{ fontSize: "13px", color: "var(--lewa-muted)", marginBottom: "12px" }}>
-                      ID: <code>{idResult.top_match.tiger_id}</code>
-                    </div>
-
-                    <div
-                      style={{
-                        height: "8px",
-                        background: "rgba(28,23,18,0.1)",
-                        borderRadius: "4px",
-                        overflow: "hidden",
-                        marginBottom: "6px",
-                      }}
-                    >
-                      <div
-                        style={{
-                          width: `${idResult.top_match.confidence * 100}%`,
-                          height: "100%",
-                          background: "var(--lewa-terracotta)",
-                          borderRadius: "4px",
-                        }}
-                      />
-                    </div>
-                    <div style={{ fontSize: "13px", fontWeight: 600, color: "var(--lewa-charcoal)" }}>
-                      {(idResult.top_match.confidence * 100).toFixed(1)}% Cosine Similarity
-                    </div>
-                  </div>
-
-                  {/* Alt Match Card */}
-                  <div
-                    style={{
-                      background: "var(--lewa-ivory)",
-                      borderRadius: "12px",
-                      padding: "24px",
-                      border: "1px solid var(--lewa-border)",
-                    }}
-                  >
-                    <div
-                      style={{
-                        fontSize: "11px",
-                        letterSpacing: "1.5px",
-                        textTransform: "uppercase",
-                        color: "var(--lewa-amber)",
-                        fontWeight: 700,
-                        marginBottom: "8px",
-                      }}
-                    >
-                      Runner-up Match
-                    </div>
-                    <div style={{ fontFamily: "var(--font-serif)", fontSize: "26px", fontWeight: 700 }}>
-                      {TIGER_CLASSIFICATION_NAMES[idResult.alt_match.tiger_id] || idResult.alt_match.tiger_id}
-                    </div>
-                    <div style={{ fontSize: "13px", color: "var(--lewa-muted)", marginBottom: "12px" }}>
-                      ID: <code>{idResult.alt_match.tiger_id}</code>
-                    </div>
-
-                    <div
-                      style={{
-                        height: "8px",
-                        background: "rgba(28,23,18,0.1)",
-                        borderRadius: "4px",
-                        overflow: "hidden",
-                        marginBottom: "6px",
-                      }}
-                    >
-                      <div
-                        style={{
-                          width: `${idResult.alt_match.confidence * 100}%`,
-                          height: "100%",
-                          background: "var(--lewa-amber)",
-                          borderRadius: "4px",
-                        }}
-                      />
-                    </div>
-                    <div style={{ fontSize: "13px", fontWeight: 600, color: "var(--lewa-charcoal)" }}>
-                      {(idResult.alt_match.confidence * 100).toFixed(1)}% Cosine Similarity
-                    </div>
-                  </div>
-                </div>
-
-                {/* All Gallery Embeddings Scores */}
-                {idResult.all_scores && idResult.all_scores.length > 0 && (
-                  <div>
-                    <h4
-                      style={{
-                        fontSize: "13px",
-                        letterSpacing: "1px",
-                        textTransform: "uppercase",
-                        color: "var(--lewa-muted)",
-                        marginBottom: "16px",
-                        fontWeight: 700,
-                      }}
-                    >
-                      Cosine Similarity Across Registered Gallery Classes
-                    </h4>
-
-                    {idResult.all_scores.map((s) => (
-                      <div
-                        key={s.tiger_id}
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: "16px",
-                          marginBottom: "10px",
-                        }}
-                      >
-                        <div style={{ width: "160px", fontSize: "13px", fontWeight: 600 }}>
-                          {TIGER_CLASSIFICATION_NAMES[s.tiger_id] || s.tiger_id}{" "}
-                          <span style={{ fontSize: "11px", color: "var(--lewa-muted)" }}>({s.tiger_id})</span>
-                        </div>
-
-                        <div
-                          style={{
-                            flex: 1,
-                            height: "6px",
-                            background: "rgba(28,23,18,0.08)",
-                            borderRadius: "3px",
-                            overflow: "hidden",
-                          }}
-                        >
-                          <div
-                            style={{
-                              width: `${s.confidence * 100}%`,
-                              height: "100%",
-                              background:
-                                s.tiger_id === idResult.top_match.tiger_id
-                                  ? "var(--lewa-terracotta)"
-                                  : "var(--lewa-light)",
-                              borderRadius: "3px",
-                            }}
-                          />
-                        </div>
-
-                        <span style={{ fontSize: "12px", fontWeight: 600, width: "60px", textAlign: "right" }}>
-                          {(s.confidence * 100).toFixed(1)}%
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                )}
               </>
             )}
           </div>
         )}
-      </div>
-    )}
 
-        {/* TAB 2: REGISTERED TIGERS & DETAILED CAPTURE LOGS */}
-        {tab === "tigers" && (
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "320px 1fr",
-              gap: "28px",
-              alignItems: "start",
-            }}
-          >
-            {/* Left Column: Identified Individuals Selection List */}
-            <div
-              style={{
-                background: "#fff",
-                borderRadius: "16px",
-                padding: "24px",
-                boxShadow: "0 8px 30px rgba(28,23,18,0.05)",
-                border: "1px solid var(--lewa-border)",
-              }}
-            >
-              <div
-                style={{
-                  fontSize: "11px",
-                  letterSpacing: "1.5px",
-                  textTransform: "uppercase",
-                  color: "var(--lewa-muted)",
-                  fontWeight: 700,
-                  marginBottom: "16px",
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "8px",
-                }}
-              >
-                <PawPrint size={14} style={{ color: "var(--lewa-terracotta)" }} />
-                Identified Individuals ({tigers.length})
+        {error && (
+          <div style={{ padding: "16px", borderRadius: "8px", background: "rgba(184,71,40,0.1)", color: "var(--lewa-terracotta)", fontSize: "14px", marginBottom: "24px" }}>
+            {error}
+          </div>
+        )}
+
+        {/* ── Folder upload (batch) ───────────────────────────────────── */}
+        <div style={{ background: "#fff", borderRadius: "12px", boxShadow: "0 4px 20px rgba(28,23,18,0.06)", padding: "28px 32px", marginBottom: "32px" }}>
+          <input
+            ref={(el) => { folderInputRef.current = el; }}
+            type="file"
+            multiple
+            /* @ts-expect-error non-standard but universally supported directory picker attributes */
+            webkitdirectory=""
+            directory=""
+            hidden
+            onChange={(e) => handleFolderSelect(e.target.files)}
+          />
+          {!folderFiles.length && !batch && (
+            <div style={{ display: "flex", gap: "14px", alignItems: "center" }}>
+              <div style={{ width: "44px", height: "44px", borderRadius: "10px", background: "var(--lewa-cream)", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--lewa-terracotta)", flexShrink: 0 }}>
+                <FolderOpen size={22} />
               </div>
-
-              <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-                {tigers.map((t) => {
-                  const isSelected = t.tiger_id === selectedTigerId;
-                  const color = TIGER_COLORS[t.tiger_id] || "var(--lewa-terracotta)";
-                  return (
-                    <div
-                      key={t.tiger_id}
-                      onClick={() => setSelectedTigerId(t.tiger_id)}
-                      style={{
-                        padding: "14px 16px",
-                        borderRadius: "12px",
-                        background: isSelected ? "var(--lewa-paper)" : "transparent",
-                        border: `1px solid ${isSelected ? color : "var(--lewa-border-subtle)"}`,
-                        cursor: "pointer",
-                        transition: "all 0.25s ease",
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "space-between",
-                        boxShadow: isSelected ? `0 4px 16px ${color}20` : "none",
-                      }}
-                    >
-                      <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-                        <div
-                          style={{
-                            width: "36px",
-                            height: "36px",
-                            borderRadius: "50%",
-                            background: `${color}18`,
-                            border: `1px solid ${color}`,
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            fontSize: "16px",
-                            overflow: "hidden",
-                            position: "relative",
-                          }}
-                        >
-                          {TIGER_IMAGES[t.tiger_id] ? (
-                            <Image
-                              src={TIGER_IMAGES[t.tiger_id]}
-                              alt={t.name}
-                              width={36}
-                              height={36}
-                              style={{ objectFit: "cover", borderRadius: "50%" }}
-                            />
-                          ) : (
-                            <PawPrint size={18} style={{ color: color }} />
-                          )}
-                        </div>
-
-                        <div>
-                          <div
-                            style={{
-                              fontFamily: "var(--font-serif)",
-                              fontSize: "16px",
-                              fontWeight: 700,
-                              color: isSelected ? "var(--lewa-charcoal)" : "var(--lewa-body)",
-                            }}
-                          >
-                            {t.name}
-                          </div>
-                          <div style={{ fontSize: "12px", color: "var(--lewa-muted)" }}>
-                            <code>{t.tiger_id}</code> • {t.sex}
-                          </div>
-                        </div>
-                      </div>
-
-                      <div style={{ textAlign: "right" }}>
-                        <div style={{ fontSize: "12px", fontWeight: 700, color: "var(--lewa-charcoal)" }}>
-                          {t.total_captures} caps
-                        </div>
-                        <div
-                          style={{
-                            fontSize: "10px",
-                            fontWeight: 600,
-                            color: "var(--lewa-terracotta)",
-                            textTransform: "uppercase",
-                          }}
-                        >
-                          Active
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
+              <div style={{ flex: 1 }}>
+                <h3 style={{ fontFamily: "var(--font-serif)", fontSize: "18px", marginBottom: "4px" }}>{t.folder_pick}</h3>
+                <p style={{ color: "var(--lewa-muted)", fontSize: "13px" }}>{t.folder_pick_desc}</p>
               </div>
+              <button className="btn-brush" style={{ display: "inline-flex", alignItems: "center", gap: "8px" }} onClick={() => folderInputRef.current?.click()}>
+                <FolderOpen size={13} /> {t.folder_pick}
+              </button>
             </div>
+          )}
 
-            {/* Right Column: Selected Individual Profile Header & Capture Log Table */}
-            <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
-              {/* Selected Tiger Header Card */}
-              {tigerDetail && (
-                <div
-                  style={{
-                    background: "#fff",
-                    borderRadius: "16px",
-                    padding: "28px 32px",
-                    boxShadow: "0 8px 30px rgba(28,23,18,0.06)",
-                    border: "1px solid var(--lewa-border)",
-                  }}
-                >
-                  <div
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                      flexWrap: "wrap",
-                      gap: "20px",
-                    }}
-                  >
-                    <div style={{ display: "flex", alignItems: "center", gap: "18px" }}>
-                      <div
-                        style={{
-                          width: "56px",
-                          height: "56px",
-                          borderRadius: "50%",
-                          background: `${TIGER_COLORS[tigerDetail.tiger_id] || "var(--lewa-terracotta)"}20`,
-                          border: `2px solid ${TIGER_COLORS[tigerDetail.tiger_id] || "var(--lewa-terracotta)"}`,
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          fontSize: "26px",
-                          boxShadow: "0 4px 12px rgba(0,0,0,0.08)",
-                          overflow: "hidden",
-                        }}
-                      >
-                        {TIGER_IMAGES[tigerDetail.tiger_id] ? (
-                          <Image
-                            src={TIGER_IMAGES[tigerDetail.tiger_id]}
-                            alt={tigerDetail.name}
-                            width={56}
-                            height={56}
-                            style={{ objectFit: "cover", borderRadius: "50%" }}
-                          />
-                        ) : (
-                          <PawPrint size={26} style={{ color: TIGER_COLORS[tigerDetail.tiger_id] || "var(--lewa-terracotta)" }} />
-                        )}
-                      </div>
-
-                      <div>
-                        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-                          <h2 style={{ fontFamily: "var(--font-serif)", fontSize: "28px", margin: 0 }}>
-                            {tigerDetail.name}
-                          </h2>
-                          <span
-                            style={{
-                              background: "var(--lewa-paper)",
-                              padding: "4px 10px",
-                              borderRadius: "20px",
-                              fontSize: "12px",
-                              fontWeight: 700,
-                              color: "var(--lewa-terracotta)",
-                              border: "1px solid var(--lewa-border)",
-                            }}
-                          >
-                            ID: {tigerDetail.tiger_id}
-                          </span>
-                        </div>
-
-                        <div style={{ fontSize: "14px", color: "var(--lewa-muted)", marginTop: "4px" }}>
-                          Sex: <strong>{tigerDetail.sex}</strong> &bull; Total Captures:{" "}
-                          <strong>{tigerDetail.total_captures}</strong>
-                        </div>
-                      </div>
-                    </div>
-
-                    {tigerDetail.captures && tigerDetail.captures.length > 0 && (
-                      <div style={{ textAlign: "right" }}>
-                        <div style={{ fontSize: "11px", textTransform: "uppercase", letterSpacing: "1px", color: "var(--lewa-muted)" }}>
-                          Last Seen
-                        </div>
-                        <div style={{ fontFamily: "var(--font-serif)", fontSize: "18px", fontWeight: 700, color: "var(--lewa-terracotta)" }}>
-                          {new Date(tigerDetail.captures[0].timestamp).toLocaleDateString()}
-                        </div>
-                        <div style={{ fontSize: "12px", color: "var(--lewa-muted)" }}>
-                          Station: <code>{tigerDetail.captures[0].station_id}</code>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {/* Detailed Capture Log Table */}
-              <div
-                style={{
-                  background: "#fff",
-                  borderRadius: "16px",
-                  padding: "28px 32px",
-                  boxShadow: "0 8px 30px rgba(28,23,18,0.05)",
-                  border: "1px solid var(--lewa-border)",
-                }}
-              >
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                    marginBottom: "20px",
-                  }}
-                >
-                  <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-                    <Activity size={18} style={{ color: "var(--lewa-terracotta)" }} />
-                    <h3 style={{ fontFamily: "var(--font-serif)", fontSize: "20px", margin: 0 }}>
-                      Capture Log ({tigerDetail?.captures?.length || 0})
-                    </h3>
-                  </div>
-                </div>
-
-                {loadingDetail ? (
-                  <div style={{ padding: "40px", textAlign: "center", color: "var(--lewa-muted)" }}>
-                    <div
-                      style={{
-                        width: "36px",
-                        height: "36px",
-                        borderRadius: "50%",
-                        border: "3px solid var(--lewa-border)",
-                        borderTopColor: "var(--lewa-terracotta)",
-                        animation: "spin 0.8s linear infinite",
-                        margin: "0 auto 12px",
-                      }}
-                    />
-                    Loading capture history...
-                  </div>
-                ) : (
-                  <div style={{ overflowX: "auto", maxHeight: "500px", overflowY: "auto" }}>
-                    <table style={{ width: "100%", borderCollapse: "collapse", textAlign: "left" }}>
-                      <thead>
-                        <tr
-                          style={{
-                            position: "sticky",
-                            top: 0,
-                            background: "#fff",
-                            borderBottom: "2px solid var(--lewa-border)",
-                            fontSize: "11px",
-                            textTransform: "uppercase",
-                            letterSpacing: "1.5px",
-                            color: "var(--lewa-muted)",
-                            zIndex: 5,
-                          }}
-                        >
-                          <th style={{ padding: "12px 10px" }}>Station</th>
-                          <th style={{ padding: "12px 10px" }}>Zone</th>
-                          <th style={{ padding: "12px 10px" }}>Lat</th>
-                          <th style={{ padding: "12px 10px" }}>Lon</th>
-                          <th style={{ padding: "12px 10px" }}>Timestamp</th>
-                          <th style={{ padding: "12px 10px" }}>Confidence</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {tigerDetail?.captures?.map((cap, idx) => (
-                          <tr
-                            key={idx}
-                            style={{
-                              borderBottom: "1px solid var(--lewa-border-subtle)",
-                              fontSize: "13px",
-                            }}
-                          >
-                            <td style={{ padding: "12px 10px" }}>
-                              <code style={{ fontWeight: 700, color: "var(--lewa-terracotta)" }}>
-                                {cap.station_id}
-                              </code>
-                            </td>
-                            <td style={{ padding: "12px 10px" }}>
-                              <span
-                                style={{
-                                  padding: "3px 8px",
-                                  borderRadius: "12px",
-                                  fontSize: "11px",
-                                  fontWeight: 700,
-                                  textTransform: "uppercase",
-                                  background: cap.zone === "core" ? "rgba(184,71,40,0.12)" : "rgba(200,134,46,0.12)",
-                                  color: cap.zone === "core" ? "var(--lewa-terracotta)" : "var(--lewa-amber)",
-                                }}
-                              >
-                                {cap.zone}
-                              </span>
-                            </td>
-                            <td style={{ padding: "12px 10px", fontFamily: "monospace" }}>
-                              {cap.lat?.toFixed(4)}
-                            </td>
-                            <td style={{ padding: "12px 10px", fontFamily: "monospace" }}>
-                              {cap.lon?.toFixed(4)}
-                            </td>
-                            <td style={{ padding: "12px 10px", color: "var(--lewa-body)" }}>
-                              {new Date(cap.timestamp).toLocaleString()}
-                            </td>
-                            <td style={{ padding: "12px 10px" }}>
-                              <span
-                                style={{
-                                  fontWeight: 700,
-                                  color:
-                                    cap.confidence >= 0.9
-                                      ? "#10B981"
-                                      : cap.confidence >= 0.85
-                                      ? "#F59E0B"
-                                      : "var(--lewa-muted)",
-                                }}
-                              >
-                                {(cap.confidence * 100).toFixed(0)}%
-                              </span>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
+          {folderFiles.length > 0 && (
+            <>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "10px", marginBottom: "12px" }}>
+                <span style={{ fontWeight: 700, fontSize: "14.5px", color: "var(--lewa-charcoal)" }}>
+                  <FolderOpen size={16} style={{ verticalAlign: "-3px", marginRight: "6px", color: "var(--lewa-terracotta)" }} />
+                  {folderFiles.length} {t.folder_selected}
+                </span>
+                {batch?.done && (
+                  <button className="btn-pill-light" style={{ display: "inline-flex", alignItems: "center", gap: "6px" }} onClick={resetFolder}>
+                    <RotateCcw size={12} /> {t.folder_another}
+                  </button>
                 )}
               </div>
-            </div>
-          </div>
-        )}
 
-        {/* TAB 3: HUMAN REVIEW QUEUE */}
-        {tab === "review" && (
-          <div style={{ maxWidth: "900px" }}>
-            {queue.length === 0 ? (
-              <div
-                style={{
-                  background: "#fff",
-                  borderRadius: "16px",
-                  padding: "60px 32px",
-                  textAlign: "center",
-                  display: "flex",
-                  flexDirection: "column",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  boxShadow: "0 8px 30px rgba(28,23,18,0.04)",
-                  border: "1px solid var(--lewa-border)",
-                }}
-              >
-                <div
-                  style={{
-                    display: "inline-flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    gap: "10px",
-                    marginBottom: "8px",
-                  }}
-                >
-                  <ShieldCheck size={24} style={{ color: "var(--lewa-terracotta)", flexShrink: 0 }} />
-                  <h3 style={{ fontFamily: "var(--font-serif)", fontSize: "22px", margin: 0 }}>
-                    Review Queue Empty
-                  </h3>
+              {!batchRunning && !batch && (
+                <div style={{ marginBottom: "12px" }}>
+                  <p style={{ fontSize: "12px", color: "var(--lewa-muted)", marginBottom: "10px" }}>
+                    <CheckCircle2 size={12} style={{ verticalAlign: "-2px", color: "#10B981" }} /> {t.folder_auto_station}
+                  </p>
+                  <div style={{ display: "flex", gap: "10px", flexWrap: "wrap", alignItems: "center" }}>
+                    <span style={{ fontSize: "13px", color: "var(--lewa-muted)" }}>{t.folder_pick_station}</span>
+                    <select
+                      value={batchStation}
+                      onChange={(e) => setBatchStation(e.target.value)}
+                      style={{ padding: "8px 10px", borderRadius: "8px", border: "1px solid #d8cfc4", fontSize: "13px", background: "#fff" }}
+                    >
+                      <option value="">—</option>
+                      {stations.map((s) => (
+                        <option key={s.station_id} value={s.station_id}>
+                          {s.station_id} ({s.beat})
+                        </option>
+                      ))}
+                    </select>
+                    <button className="btn-brush" style={{ display: "inline-flex", alignItems: "center", gap: "8px" }} onClick={runFolderBatch}>
+                      <ScanSearch size={13} /> {t.folder_process_btn}
+                    </button>
+                    <button className="btn-pill-light" onClick={resetFolder}>{t.folder_cancel}</button>
+                  </div>
                 </div>
-                <p style={{ color: "var(--lewa-muted)", fontSize: "14px", margin: 0 }}>
-                  All ambiguous Re-ID matches have been reviewed by forest department rangers.
-                </p>
-              </div>
-            ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-                {queue.map((item) => (
-                  <div
-                    key={item.id}
-                    style={{
-                      background: "#fff",
-                      borderRadius: "16px",
-                      padding: "24px 32px",
-                      boxShadow: "0 8px 30px rgba(28,23,18,0.06)",
-                      border: "1px solid var(--lewa-border)",
-                    }}
-                  >
-                    <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: "20px" }}>
-                      <div>
-                        <div
-                          style={{
-                            fontSize: "11px",
-                            letterSpacing: "1.5px",
-                            textTransform: "uppercase",
-                            color: "var(--lewa-amber)",
-                            fontWeight: 700,
-                            marginBottom: "6px",
-                          }}
-                        >
-                          Ambiguous Re-ID Match — Ranger Confirmation Required
-                        </div>
-                        <div style={{ fontSize: "13px", color: "var(--lewa-muted)" }}>
-                          Station: <code>{item.station_id}</code> • {new Date(item.timestamp).toLocaleString()}
-                        </div>
+              )}
 
-                        <div style={{ display: "flex", gap: "32px", marginTop: "20px" }}>
-                          <div>
-                            <div style={{ fontSize: "11px", color: "var(--lewa-muted)" }}>Top Candidate</div>
-                            <div style={{ fontFamily: "var(--font-serif)", fontSize: "20px", fontWeight: 700 }}>
-                              {TIGER_CLASSIFICATION_NAMES[item.top_match_id] || item.top_match_id}
-                            </div>
-                            <div style={{ fontSize: "13px", fontWeight: 600, color: "var(--lewa-terracotta)" }}>
-                              {(item.top_match_confidence * 100).toFixed(1)}% match
-                            </div>
-                          </div>
-
-                          <div style={{ width: "1px", background: "var(--lewa-border)" }} />
-
-                          <div>
-                            <div style={{ fontSize: "11px", color: "var(--lewa-muted)" }}>Alternative Candidate</div>
-                            <div style={{ fontFamily: "var(--font-serif)", fontSize: "20px", fontWeight: 700 }}>
-                              {TIGER_CLASSIFICATION_NAMES[item.alt_match_id] || item.alt_match_id}
-                            </div>
-                            <div style={{ fontSize: "13px", fontWeight: 600, color: "var(--lewa-amber)" }}>
-                              {(item.alt_match_confidence * 100).toFixed(1)}% match
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-
-                      <div style={{ display: "flex", gap: "12px", alignItems: "center" }}>
-                        <button
-                          onClick={() => handleResolve(item.id, "confirm")}
-                          className="btn-brush"
-                        >
-                          <CheckCircle2 size={14} /> CONFIRM TOP
-                        </button>
-                        <button
-                          onClick={() => handleResolve(item.id, "new")}
-                          className="btn-pill-light"
-                        >
-                          ENROLL NEW
-                        </button>
-                      </div>
+              {(batchRunning || batch) && (
+                <div style={{ border: "1px solid #e8e0d5", borderRadius: "10px", padding: "18px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "8px", fontSize: "13px", flexWrap: "wrap", gap: "6px" }}>
+                    <span style={{ fontWeight: 700, color: batch?.done ? "#10B981" : "var(--lewa-charcoal)" }}>
+                      {batchRunning ? <Loader2 size={14} className="spin" style={{ verticalAlign: "-2px" }} /> : <CheckCircle2 size={14} style={{ verticalAlign: "-2px", color: "#10B981" }} />}
+                      {" "}{batchRunning ? t.folder_processing : t.folder_done}
+                    </span>
+                    <span style={{ color: "var(--lewa-muted)" }}>
+                      {batch?.processed}/{folderFiles.length} {t.folder_photos_word}
+                      {batch?.current ? ` · ${batch.current}` : ""}
+                    </span>
+                  </div>
+                  <div style={{ height: "10px", background: "var(--lewa-cream)", borderRadius: "5px", overflow: "hidden", marginBottom: "14px" }}>
+                    <div style={{
+                      height: "100%",
+                      width: `${Math.round(((batch?.processed ?? 0) / Math.max(1, folderFiles.length)) * 100)}%`,
+                      background: "var(--lewa-amber)", transition: "width 0.4s ease", borderRadius: "5px",
+                    }} />
+                  </div>
+                  {batchRunning && (
+                    <button className="btn-pill-light" style={{ display: "inline-flex", alignItems: "center", gap: "6px", marginBottom: "12px" }}
+                      onClick={() => { batchCancelRef.current = true; setBatchCancel(true); }}>
+                      <Ban size={12} /> {t.folder_cancel}
+                    </button>
+                  )}
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(110px, 1fr))", gap: "10px" }}>
+                    <div style={{ background: "var(--lewa-cream)", padding: "10px", borderRadius: "8px", textAlign: "center" }}>
+                      <div style={{ fontFamily: "var(--font-serif)", fontSize: "20px", color: "#10B981" }}>{batch?.matched}</div>
+                      <div style={{ fontSize: "9.5px", textTransform: "uppercase", letterSpacing: "1px", color: "var(--lewa-muted)" }}>{t.unified_outcome_matched}</div>
                     </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* TAB 4: VIDEO MANAGER */}
-        {tab === "video" && (
-          <div style={{ maxWidth: "800px" }}>
-            <div
-              style={{
-                background: "#fff",
-                borderRadius: "16px",
-                padding: "36px",
-                boxShadow: "0 8px 30px rgba(28,23,18,0.06)",
-                border: "1px solid var(--lewa-border)",
-              }}
-            >
-              <div style={{ marginBottom: "28px" }}>
-                <div
-                  style={{
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: "8px",
-                    padding: "4px 12px",
-                    borderRadius: "20px",
-                    background: "rgba(184, 71, 40, 0.1)",
-                    color: "var(--lewa-terracotta)",
-                    fontSize: "11px",
-                    fontWeight: 700,
-                    letterSpacing: "1.5px",
-                    textTransform: "uppercase",
-                    marginBottom: "8px",
-                  }}
-                >
-                  <Film size={14} /> Field Video Telemetry
-                </div>
-                <h3 style={{ fontFamily: "var(--font-serif)", fontSize: "28px", margin: "4px 0 8px" }}>
-                  Upload Video from Field Station or Laptop
-                </h3>
-                <p style={{ color: "var(--lewa-muted)", fontSize: "14px", lineHeight: "1.6" }}>
-                  Upload high-definition camera trap MP4 or WebM video footage to update background telemetry and hero displays in real time.
-                </p>
-              </div>
-
-              {!videoFile ? (
-                <div
-                  className={`lewa-dropzone ${videoDragOver ? "dragging" : ""}`}
-                  onDragOver={(e) => {
-                    e.preventDefault();
-                    setVideoDragOver(true);
-                  }}
-                  onDragLeave={() => setVideoDragOver(false)}
-                  onDrop={handleVideoDrop}
-                  onClick={() => videoInputRef.current?.click()}
-                  style={{
-                    padding: "48px 24px",
-                    border: "2px dashed var(--lewa-border)",
-                    borderRadius: "14px",
-                    textAlign: "center",
-                    background: "var(--lewa-cream)",
-                    cursor: "pointer",
-                    transition: "all 0.25s ease",
-                  }}
-                >
-                  <input
-                    type="file"
-                    ref={videoInputRef}
-                    accept="video/mp4,video/webm,video/quicktime"
-                    style={{ display: "none" }}
-                    onChange={(e) => {
-                      const f = e.target.files?.[0];
-                      if (f) handleVideoSelect(f);
-                    }}
-                  />
-                  <Video
-                    size={48}
-                    style={{ color: "var(--lewa-terracotta)", margin: "0 auto 12px" }}
-                  />
-                  <div style={{ fontFamily: "var(--font-serif)", fontSize: "19px", fontWeight: 600, marginBottom: "6px" }}>
-                    Drag &amp; drop field video here, or browse files
-                  </div>
-                  <div style={{ fontSize: "12px", color: "var(--lewa-muted)" }}>
-                    Supports MP4, WebM, MOV up to 200MB
-                  </div>
-                </div>
-              ) : (
-                <div>
-                  <div
-                    style={{
-                      borderRadius: "12px",
-                      overflow: "hidden",
-                      maxHeight: "320px",
-                      background: "#000",
-                      marginBottom: "20px",
-                    }}
-                  >
-                    {videoPreviewUrl && (
-                      <video
-                        src={videoPreviewUrl}
-                        controls
-                        autoPlay
-                        muted
-                        style={{ width: "100%", maxHeight: "320px", objectFit: "contain" }}
-                      />
+                    <div style={{ background: "var(--lewa-cream)", padding: "10px", borderRadius: "8px", textAlign: "center" }}>
+                      <div style={{ fontFamily: "var(--font-serif)", fontSize: "20px", color: "#B87140" }}>{batch?.review}</div>
+                      <div style={{ fontSize: "9.5px", textTransform: "uppercase", letterSpacing: "1px", color: "var(--lewa-muted)" }}>{t.unified_outcome_review}</div>
+                    </div>
+                    <div style={{ background: "var(--lewa-cream)", padding: "10px", borderRadius: "8px", textAlign: "center" }}>
+                      <div style={{ fontFamily: "var(--font-serif)", fontSize: "20px", color: "#A855F7" }}>{batch?.newTiger}</div>
+                      <div style={{ fontSize: "9.5px", textTransform: "uppercase", letterSpacing: "1px", color: "var(--lewa-muted)" }}>{t.unified_outcome_new_tiger}</div>
+                    </div>
+                    <div style={{ background: "var(--lewa-cream)", padding: "10px", borderRadius: "8px", textAlign: "center" }}>
+                      <div style={{ fontFamily: "var(--font-serif)", fontSize: "20px", color: "var(--lewa-muted)" }}>{batch?.blank}</div>
+                      <div style={{ fontSize: "9.5px", textTransform: "uppercase", letterSpacing: "1px", color: "var(--lewa-muted)" }}>{t.unified_outcome_blank}</div>
+                    </div>
+                    {batch && batch.errors > 0 && (
+                      <div style={{ background: "var(--lewa-cream)", padding: "10px", borderRadius: "8px", textAlign: "center" }}>
+                        <div style={{ fontFamily: "var(--font-serif)", fontSize: "20px", color: "var(--lewa-terracotta)" }}>{batch.errors}</div>
+                        <div style={{ fontSize: "9.5px", textTransform: "uppercase", letterSpacing: "1px", color: "var(--lewa-muted)" }}>{t.folder_errors}</div>
+                      </div>
                     )}
                   </div>
+                  {batch?.done && batchResults.length > 0 && (
+                    <div style={{ marginTop: "16px", maxHeight: "260px", overflowY: "auto", display: "flex", flexDirection: "column", gap: "6px" }}>
+                      {batchResults.map((r, i) => (
+                        <div key={i} style={{ display: "flex", justifyContent: "space-between", gap: "10px", padding: "8px 12px", background: "var(--lewa-cream)", borderRadius: "6px", fontSize: "12px" }}>
+                          <span style={{ fontFamily: "monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.name}</span>
+                          <span style={{ whiteSpace: "nowrap", fontWeight: 600, color: r.outcome === "matched" ? "#10B981" : r.outcome === "review" ? "#B87140" : r.outcome === "new_tiger" ? "#A855F7" : "var(--lewa-muted)" }}>
+                            {r.tiger ? `${r.tiger} · ${Math.round((r.conf ?? 0) * 100)}%` : t[`unified_outcome_${r.outcome === "error" ? "blank" : r.outcome}` as keyof typeof t] ?? r.outcome}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+        </div>
 
-                  <div style={{ fontSize: "14px", color: "var(--lewa-charcoal)", marginBottom: "20px", fontWeight: 600 }}>
-                    {videoFile.name} ({(videoFile.size / (1024 * 1024)).toFixed(1)} MB)
-                  </div>
-
-                  <div style={{ display: "flex", gap: "12px" }}>
-                    <button
-                      className="btn-brush"
-                      onClick={handleVideoUpload}
-                      disabled={videoUploading}
-                    >
-                      {videoUploading ? "Uploading & Processing..." : "APPLY AS HERO VIDEO"}
-                    </button>
-                    <button
-                      className="btn-pill-light"
-                      onClick={() => {
-                        setVideoFile(null);
-                        setVideoPreviewUrl(null);
+        {/* ── Pipeline stepper ───────────────────────────────────────── */}
+        {(analyzing || result) && (
+          <div style={{ background: "#fff", borderRadius: "12px", boxShadow: "0 4px 20px rgba(28,23,18,0.06)", padding: "32px", marginBottom: "24px" }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: "16px" }}>
+              {stepDefs.map((sd, i) => {
+                const state = steps[sd.key] ?? "pending";
+                const isDone = state === "done";
+                const isActive = state === "active";
+                const isSkipped = state === "skipped";
+                return (
+                  <div key={sd.key} style={{ textAlign: "center", opacity: isSkipped ? 0.35 : 1 }}>
+                    <div
+                      style={{
+                        width: "52px", height: "52px", borderRadius: "50%", margin: "0 auto 10px",
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                        border: `2px solid ${isDone ? "#10B981" : isActive ? "var(--lewa-amber)" : "#e0d8cc"}`,
+                        background: isDone ? "rgba(16,185,129,0.08)" : isActive ? "rgba(191,141,51,0.08)" : "transparent",
+                        color: isDone ? "#10B981" : isActive ? "var(--lewa-amber)" : "#b0a698",
                       }}
-                      disabled={videoUploading}
                     >
-                      Choose Different Video
-                    </button>
+                      {isActive ? <Loader2 size={22} className="spin" /> : isDone ? <CheckCircle2 size={22} /> : <span style={{ fontFamily: "var(--font-serif)", fontSize: "18px" }}>{i + 1}</span>}
+                    </div>
+                    <div style={{ fontSize: "13px", fontWeight: 700, color: "var(--lewa-charcoal)", marginBottom: "4px" }}>
+                      {sd.label} {isSkipped && "·"}
+                    </div>
+                    <div style={{ fontSize: "11px", color: "var(--lewa-muted)", lineHeight: 1.5 }}>{sd.desc}</div>
                   </div>
-                </div>
-              )}
+                );
+              })}
+            </div>
+          </div>
+        )}
 
-              {videoErrorMsg && (
-                <div
-                  style={{
-                    marginTop: "16px",
-                    padding: "14px",
-                    borderRadius: "8px",
-                    background: "rgba(184, 71, 40, 0.1)",
-                    color: "var(--lewa-terracotta)",
-                    fontSize: "13px",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "8px",
-                  }}
-                >
-                  <AlertCircle size={16} /> {videoErrorMsg}
+        {/* ── Result card ─────────────────────────────────────────────── */}
+        {result && meta && (
+          <div style={{ background: "#fff", borderRadius: "12px", boxShadow: "0 4px 20px rgba(28,23,18,0.06)", padding: "32px", marginBottom: "32px", borderTop: `4px solid ${meta.color}` }}>
+            <div style={{ display: "flex", gap: "24px", alignItems: "center", flexWrap: "wrap" }}>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}${result.image_url}`}
+                alt="analyzed"
+                style={{ width: "200px", height: "200px", objectFit: "cover", borderRadius: "10px", border: "1px solid #eee" }}
+              />
+              <div style={{ flex: 1, minWidth: "240px" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "10px", color: meta.color }}>
+                  {meta.icon}
+                  <span style={{ fontSize: "15px", fontWeight: 700 }}>{meta.label}</span>
                 </div>
-              )}
 
-              {videoSuccessMsg && (
-                <div
-                  style={{
-                    marginTop: "16px",
-                    padding: "14px",
-                    borderRadius: "8px",
-                    background: "rgba(16, 185, 129, 0.1)",
-                    color: "#10b981",
-                    fontSize: "13px",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "8px",
-                  }}
-                >
-                  <CheckCircle2 size={16} /> {videoSuccessMsg}
+                {result.final.name && (
+                  <h2 style={{ fontFamily: "var(--font-serif)", fontSize: "34px", color: "var(--lewa-charcoal)", margin: "0 0 4px" }}>
+                    {result.final.name}
+                    <span style={{ fontSize: "16px", color: "var(--lewa-muted)", fontWeight: 400 }}> ({result.final.tiger_id})</span>
+                  </h2>
+                )}
+                {result.final.sex && result.final.outcome !== "blank" && (
+                  <p style={{ color: "var(--lewa-muted)", fontSize: "14px", margin: "0 0 14px" }}>
+                    {result.final.sex === "Male" ? (language === "hi" ? "नर" : language === "mr" ? "नर" : "Male") :
+                     result.final.sex === "Female" ? (language === "hi" ? "मादा" : language === "mr" ? "मादा" : "Female") : result.final.sex}
+                  </p>
+                )}
+
+                {result.final.confidence !== null && result.final.outcome !== "blank" && (
+                  <div style={{ marginBottom: "14px" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: "12px", color: "var(--lewa-muted)", marginBottom: "4px" }}>
+                      <span>{t.unified_result_confidence}</span>
+                      <span>{Math.round(result.final.confidence * 100)}%</span>
+                    </div>
+                    <div style={{ height: "8px", background: "var(--lewa-cream)", borderRadius: "4px", overflow: "hidden" }}>
+                      <div style={{ height: "100%", width: `${result.final.confidence * 100}%`, background: meta.color, borderRadius: "4px", transition: "width 0.8s ease" }} />
+                    </div>
+                  </div>
+                )}
+
+                {result.final.outcome === "review" && (
+                  <p style={{ color: "var(--lewa-terracotta)", fontSize: "13px", marginBottom: "14px" }}>
+                    {t.unified_top_match}: <strong>{result.final.tiger_id}</strong> · {t.unified_alt_match}:{" "}
+                    <strong>{result.final.all_scores[1]?.tiger_id}</strong>
+                  </p>
+                )}
+
+                {result.final.outcome === "matched" && result.final.all_scores.length > 0 && (
+                  <p style={{ color: "var(--lewa-muted)", fontSize: "13px", marginBottom: "14px" }}>
+                    {t.unified_alt_match}: <strong>{result.final.all_scores[1]?.tiger_id}</strong>
+                  </p>
+                )}
+
+                <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+                  {result.final.outcome === "review" && (
+                    <a href="/identification#queue" className="btn-pill-light" style={{ display: "inline-flex", alignItems: "center", gap: "6px", textDecoration: "none" }}>
+                      {t.unified_result_go_to_review} <ArrowRight size={12} />
+                    </a>
+                  )}
+                  <button className="btn-brush" style={{ display: "inline-flex", alignItems: "center", gap: "8px" }} onClick={reset}>
+                    <RotateCcw size={13} /> {t.unified_analyze_another}
+                  </button>
                 </div>
+              </div>
+            </div>
+
+            {/* Stage detail chips */}
+            <div style={{ display: "flex", gap: "10px", flexWrap: "wrap", marginTop: "22px", paddingTop: "18px", borderTop: "1px solid #f0ebe3" }}>
+              {result.stages.blank_filter && (
+                <span style={{ fontSize: "12px", padding: "6px 12px", background: "var(--lewa-cream)", borderRadius: "20px", color: "var(--lewa-muted)" }}>
+                  {t.unified_step_blank}: {Math.round(result.stages.blank_filter.confidence * 100)}%
+                </span>
+              )}
+              {result.stages.species_gate?.is_tiger && (
+                <span style={{ fontSize: "12px", padding: "6px 12px", background: "var(--lewa-cream)", borderRadius: "20px", color: "var(--lewa-muted)" }}>
+                  {t.unified_step_species}: {Math.round(result.stages.species_gate.tiger_probability * 100)}%
+                </span>
+              )}
+              {result.stages.stripe_reid && (
+                <span style={{ fontSize: "12px", padding: "6px 12px", background: "var(--lewa-cream)", borderRadius: "20px", color: "var(--lewa-muted)" }}>
+                  {t.unified_step_reid}: 256-D
+                </span>
               )}
             </div>
           </div>
         )}
+
+        {/* ── SD-Card Import (same page) ──────────────────────────────── */}
+        <SdCardImportPanel />
+
+        {/* ── Registered Tigers (collapsed) ────────────────────────────── */}
+        <div style={{ background: "#fff", borderRadius: "12px", boxShadow: "0 4px 20px rgba(28,23,18,0.06)", padding: "24px 32px", marginBottom: "20px" }}>
+          <button
+            onClick={() => setShowTigers(!showTigers)}
+            style={{ width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center", background: "none", border: "none", cursor: "pointer" }}
+          >
+            <span style={{ fontFamily: "var(--font-serif)", fontSize: "18px" }}>
+              {t.unified_registered_tigers} ({tigers.length})
+            </span>
+            {showTigers ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
+          </button>
+          {showTigers && (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(210px, 1fr))", gap: "14px", marginTop: "18px" }}>
+              {tigers.map((tg) => (
+                <div key={tg.tiger_id} style={{ border: "1px solid #eee", borderRadius: "10px", padding: "16px", borderTop: `3px solid ${tigerColor(tg.tiger_id)}` }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px" }}>
+                    <PawPrint size={14} style={{ color: tigerColor(tg.tiger_id) }} />
+                    <strong style={{ fontSize: "14px" }}>{tg.name}</strong>
+                  </div>
+                  <div style={{ fontSize: "12px", color: "var(--lewa-muted)", lineHeight: 1.6 }}>
+                    {tg.tiger_id} · {tg.sex === "Male" ? (language === "hi" ? "नर" : language === "mr" ? "नर" : "Male") : tg.sex === "Female" ? (language === "hi" ? "मादा" : language === "mr" ? "मादा" : "Female") : tg.sex}
+                    <br />
+                    {tg.total_captures} {t.unified_captures_label} · {t.unified_last_seen}: {tg.last_station || "—"}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* ── Review Queue (collapsed) ────────────────────────────────── */}
+        <div id="queue" style={{ background: "#fff", borderRadius: "12px", boxShadow: "0 4px 20px rgba(28,23,18,0.06)", padding: "24px 32px" }}>
+          <button
+            onClick={() => setShowQueue(!showQueue)}
+            style={{ width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center", background: "none", border: "none", cursor: "pointer" }}
+          >
+            <span style={{ fontFamily: "var(--font-serif)", fontSize: "18px" }}>
+              {t.unified_review_queue} ({queue.length})
+            </span>
+            {showQueue ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
+          </button>
+          {showQueue && (
+            <div style={{ display: "flex", flexDirection: "column", gap: "10px", marginTop: "18px" }}>
+              {queue.length === 0 && (
+                <p style={{ color: "var(--lewa-muted)", fontSize: "14px" }}>—</p>
+              )}
+              {queue.map((item) => (
+                <div key={item.id} style={{ display: "flex", justifyContent: "space-between", padding: "12px 16px", background: "var(--lewa-cream)", borderRadius: "8px", fontSize: "13px", flexWrap: "wrap", gap: "8px" }}>
+                  <span>#{item.id} · {item.station_id}</span>
+                  <span>
+                    {t.unified_top_match}: <strong>{item.top_match_id}</strong> ({Math.round(item.top_match_confidence * 100)}%)
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </main>
     </>
   );

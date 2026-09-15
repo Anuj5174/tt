@@ -40,44 +40,52 @@ interface MessageItem {
   timestamp: string;
 }
 
+// label keys translate per language; query stays English because the
+// backend intent router is keyword-based. Each query below was verified
+// against the live Pench dataset (T1xx tigers, C-grid stations) so every
+// prompt returns a real answer, and each hits a distinct intent type:
+// census, profile, enrollment, range size, last detection, movement
+// timeline, overlap, buffer entry, severity-filtered alerts, absence,
+// risk ranking, patrol routing, cycle summary, review queue, camera
+// health, and station activity.
 const QUICK_PROMPTS = [
   {
-    category: "Tigers & Profiles",
+    categoryKey: "chat_quick_cat_1",
     queries: [
-      "Show all registered tigers",
-      "Tell me about Choti Tara (PTR-T01)",
-      "Where was Kanha (PTR-T03) detected?",
-      "Show movement history of PTR-T01",
+      { key: "chat_quick_q1", query: "How many tigers are registered in the database?" },
+      { key: "chat_quick_q2", query: "Tell me about Tiger T112" },
+      { key: "chat_quick_q3", query: "Show newly identified tigers" },
+      { key: "chat_quick_q4", query: "Which tiger has the largest home range?" },
     ],
   },
   {
-    category: "Territory & Movement",
+    categoryKey: "chat_quick_cat_2",
     queries: [
-      "What is T-01's home range?",
-      "Which tigers have overlapping territories?",
-      "Which tigers entered the buffer zone?",
-      "Which tigers show abnormal movement deviations?",
+      { key: "chat_quick_q5", query: "Where was T112 last seen?" },
+      { key: "chat_quick_q6", query: "Show movement history of T112" },
+      { key: "chat_quick_q7", query: "Which tiger territories overlap?" },
+      { key: "chat_quick_q8", query: "Which tigers entered the buffer zone?" },
     ],
   },
   {
-    category: "Safety & Conflict Alerts",
+    categoryKey: "chat_quick_cat_3",
     queries: [
-      "Show high severity alerts",
-      "Which stations are near villages with tiger activity?",
-      "Which tigers have prolonged absence?",
-      "Which stations have high risk?",
+      { key: "chat_quick_q9", query: "Show high severity alerts" },
+      { key: "chat_quick_q10", query: "Which tigers have not been seen recently?" },
+      { key: "chat_quick_q11", query: "Which stations have high risk?" },
+      { key: "chat_quick_q12", query: "Suggest a patrol sequence for today" },
     ],
   },
   {
-    category: "Monitoring & Triage",
+    categoryKey: "chat_quick_cat_4",
     queries: [
-      "Give me a summary of this monitoring cycle",
-      "How many blank images were removed?",
-      "How many images need human review?",
-      "Check camera station health",
+      { key: "chat_quick_q13", query: "Give me a summary of this monitoring cycle" },
+      { key: "chat_quick_q14", query: "Are there any images pending review?" },
+      { key: "chat_quick_q15", query: "Are all cameras working properly?" },
+      { key: "chat_quick_q16", query: "Which station has the most tiger activity?" },
     ],
   },
-];
+] as const;
 
 export default function ChatPage() {
   const { t, language } = useLanguage();
@@ -121,18 +129,18 @@ export default function ChatPage() {
           });
           setMessages(formatted);
         } else {
-          // Add default welcome message
+          // Add default welcome message (localized)
           setMessages([
             {
               id: "welcome-1",
               sender: "assistant",
-              text: `🌿 **Welcome to the Pench Offline Conservation Intelligence Assistant.**\n\nI am connected directly to your local Pench Tiger Reserve database. I can answer inquiries regarding:\n• **Individual Tiger Profiles & Sightings**\n• **Home Range & Territory Overlaps**\n• **Buffer Zone Incursions & Community Risk**\n• **Triage, Blank Filtering & Camera Health**\n\n*All processing is 100% local, air-gapped, and grounded in ground-truth survey records.*`,
+              text: `🌿 **${t.chat_welcome}**`,
               intent: "GET_HELP",
               timestamp: new Date().toISOString(),
               actions: [
-                { label: "Dashboard", route: "/", icon: "LayoutDashboard" },
-                { label: "Territory Map", route: "/map", icon: "MapPin" },
-                { label: "Behavioral Alerts", route: "/alerts", icon: "AlertTriangle" },
+                { label: t.chat_act_dashboard, route: "/", icon: "LayoutDashboard" },
+                { label: t.chat_act_map, route: "/map", icon: "MapPin" },
+                { label: t.chat_act_alerts, route: "/alerts", icon: "AlertTriangle" },
               ],
             },
           ]);
@@ -160,7 +168,7 @@ export default function ChatPage() {
     setLoading(true);
 
     try {
-      const res: ChatResponseData = await sendChatMessage(text);
+      const res: ChatResponseData = await sendChatMessage(text, language);
       const botMsg: MessageItem = {
         id: `bot-${Date.now()}`,
         sender: "assistant",
@@ -175,7 +183,12 @@ export default function ChatPage() {
       const errorMsg: MessageItem = {
         id: `error-${Date.now()}`,
         sender: "assistant",
-        text: `**Connection Error**: Unable to reach local backend API (${err.message}). Ensure the backend server is active on port 8000.`,
+        text:
+          language === "hi"
+            ? `**कनेक्शन त्रुटि**: बैकएंड एपीआई तक नहीं पहुँच सके (${err.message})। सुनिश्चित करें कि पोर्ट 8000 पर सर्वर चालू है।`
+            : language === "mr"
+              ? `**जोडणी त्रुटी**: बॅकएंड एपीआय पर्यंत पोहोचू शकले नाही (${err.message}). पोर्ट 8000 वर सर्व्हर चालू आहे याची खात्री करा.`
+              : `**Connection Error**: Unable to reach local backend API (${err.message}). Ensure the backend server is active on port 8000.`,
         timestamp: new Date().toISOString(),
       };
       setMessages((prev) => [...prev, errorMsg]);
@@ -186,14 +199,25 @@ export default function ChatPage() {
   };
 
   const handleClear = async () => {
-    if (window.confirm("Are you sure you want to clear conversation history?")) {
+    const confirmMsg =
+      language === "hi"
+        ? "क्या आप वाकई बातचीत का इतिहास साफ़ करना चाहते हैं?"
+        : language === "mr"
+          ? "तुम्हाला खरंच संभाषणाचा इतिहास पुसून टाकायचा आहे का?"
+          : "Are you sure you want to clear conversation history?";
+    if (window.confirm(confirmMsg)) {
       try {
         await clearChatHistory();
         setMessages([
           {
             id: "welcome-reset",
             sender: "assistant",
-            text: `Conversation history cleared. Ready for your field queries.`,
+            text:
+              language === "hi"
+                ? "बातचीत का इतिहास साफ़ हो गया। अपने प्रश्न पूछें।"
+                : language === "mr"
+                  ? "संभाषण इतिहास पुसला. तुमचे प्रश्न विचारा."
+                  : "Conversation history cleared. Ready for your field queries.",
             intent: "GET_HELP",
             timestamp: new Date().toISOString(),
           },
@@ -323,7 +347,7 @@ export default function ChatPage() {
             <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
               {QUICK_PROMPTS.map((cat, idx) => (
                 <button
-                  key={cat.category}
+                  key={cat.categoryKey}
                   onClick={() => setActiveCategory(idx)}
                   className={activeCategory === idx ? "btn-brush" : "btn-pill-light"}
                   style={{
@@ -332,7 +356,7 @@ export default function ChatPage() {
                     cursor: "pointer",
                   }}
                 >
-                  {cat.category}
+                  {t[cat.categoryKey]}
                 </button>
               ))}
             </div>
@@ -347,10 +371,10 @@ export default function ChatPage() {
               }}
             >
               <span style={{ display: "inline-flex", alignItems: "center", gap: "4px" }}>
-                <WifiOff size={13} /> Air-Gapped Mode
+                <WifiOff size={13} /> {t.chat_offline_badge}
               </span>
               <span style={{ display: "inline-flex", alignItems: "center", gap: "4px" }}>
-                <Database size={13} /> SQLite Grounded
+                <Database size={13} /> {t.chat_local_badge}
               </span>
               <button
                 onClick={handleClear}
@@ -368,7 +392,7 @@ export default function ChatPage() {
                 }}
                 title="Clear Chat History"
               >
-                <Trash2 size={12} /> Clear
+                <Trash2 size={12} /> {t.chat_clear}
               </button>
             </div>
           </div>
@@ -377,8 +401,8 @@ export default function ChatPage() {
           <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
             {QUICK_PROMPTS[activeCategory].queries.map((q) => (
               <button
-                key={q}
-                onClick={() => handleSend(q)}
+                key={q.key}
+                onClick={() => handleSend(q.query)}
                 disabled={loading}
                 style={{
                   background: "var(--lewa-ivory)",
@@ -402,7 +426,7 @@ export default function ChatPage() {
                   e.currentTarget.style.color = "var(--lewa-charcoal)";
                 }}
               >
-                <span>{q}</span>
+                <span>{t[q.key]}</span>
                 <ArrowRight size={11} style={{ opacity: 0.6 }} />
               </button>
             ))}
@@ -491,7 +515,7 @@ export default function ChatPage() {
                         {m.intent}
                       </span>
                       <span>•</span>
-                      <span>LOCAL DETERMINISTIC</span>
+                      <span>{t.chat_local_badge}</span>
                     </div>
                   )}
 
@@ -584,7 +608,7 @@ export default function ChatPage() {
                 }}
               >
                 <Sparkles size={14} className="animate-spin" />
-                <span>Interrogating local Pench DB & spatial indices...</span>
+                <span>{t.chat_welcome_short}</span>
               </div>
             </div>
           )}
@@ -643,7 +667,7 @@ export default function ChatPage() {
               gap: "6px",
             }}
           >
-            <span>ASK</span>
+            <span>{t.chat_send}</span>
             <Send size={13} />
           </button>
         </form>
@@ -662,12 +686,12 @@ export default function ChatPage() {
           }}
         >
           <span style={{ display: "inline-flex", alignItems: "center", gap: "4px" }}>
-            <ShieldCheck size={12} color="#10b981" /> Read-Only Safe Execution
+            <ShieldCheck size={12} color="#10b981" /> {t.chat_footer_ro}
           </span>
           <span>•</span>
-          <span>Zero Cloud Transmissions</span>
+          <span>{t.chat_footer_zc}</span>
           <span>•</span>
-          <span>Pench Tiger Reserve Camera Trap Intelligence</span>
+          <span>{t.chat_footer_pt}</span>
         </div>
       </main>
     </>

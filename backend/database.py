@@ -23,7 +23,8 @@ class Tiger(Base):
     sex         = Column(String)
     enrolled_at = Column(DateTime, default=datetime.utcnow)
     total_captures = Column(Integer, default=0)
-    embedding_json = Column(Text)  # FAISS vector stored as JSON
+    embedding_json = Column(Text)  # FAISS vector stored as JSON (full-image centroid)
+    embedding2_json = Column(Text)  # MegaDetector-crop centroid (see enrich_gallery_crops.py)
 
 class Capture(Base):
     __tablename__ = "captures"
@@ -38,6 +39,18 @@ class Capture(Base):
     zone        = Column(String)   # "core" | "buffer" | "village_adjacent"
     flank_side  = Column(String)   # "Left" | "Right"
 
+class CameraStation(Base):
+    """Real camera-trap location from the PTR survey (PTR Camera Locations 24-25.xlsx)."""
+    __tablename__ = "camera_stations"
+    id          = Column(Integer, primary_key=True, index=True)
+    station_id  = Column(String, unique=True, index=True)  # "C090" (camera GRID id)
+    grid_id     = Column(Integer, index=True)
+    block       = Column(String)
+    beat        = Column(String)
+    range_name  = Column(String)
+    latitude    = Column(Float)
+    longitude   = Column(Float)
+
 class TriageRun(Base):
     __tablename__ = "triage_runs"
     id              = Column(Integer, primary_key=True, index=True)
@@ -47,6 +60,20 @@ class TriageRun(Base):
     retained        = Column(Integer)
     saved_mb        = Column(Float)
     saved_minutes   = Column(Float)
+
+class IngestBatch(Base):
+    """One confirmed SD-card import (see services/ingest_service.py)."""
+    __tablename__ = "ingest_batches"
+    id                = Column(Integer, primary_key=True, index=True)
+    job_id            = Column(String, unique=True, index=True)
+    station_id        = Column(String, index=True)
+    started_at        = Column(DateTime, default=datetime.utcnow)
+    total_files       = Column(Integer)
+    copied_files      = Column(Integer)
+    skipped_duplicates = Column(Integer)
+    blanks            = Column(Integer)
+    retained          = Column(Integer)
+    saved_mb          = Column(Float)
 
 class ReviewQueue(Base):
     __tablename__ = "review_queue"

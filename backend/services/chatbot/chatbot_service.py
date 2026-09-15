@@ -49,8 +49,9 @@ class ChatbotService:
             else:
                 data = execute_query(intent, entities, db)
 
-            # ── Step 4: Generate response ────────────────────────────────
-            answer, actions = generate_response(intent, entities, data)
+            # ── Step 4: Generate response (localized) ───────────────────
+            lang = getattr(request, "language", "en") or "en"
+            answer, actions = generate_response(intent, entities, data, lang)
 
             # ── Step 5: Save to chat history ─────────────────────────────
             self._save_history(db, message, intent.value, entities, answer)
@@ -67,13 +68,15 @@ class ChatbotService:
 
         except Exception as e:
             print(f"[CHATBOT ERROR] {traceback.format_exc()}")
+            from .response_translations import T
+            lang = getattr(request, "language", "en") or "en"
             return ChatResponse(
                 success=False,
                 intent=Intent.UNKNOWN.value,
-                answer=f"⚠️ I encountered an error processing your question: {str(e)}\n\nPlease try rephrasing or type \"help\" to see what I can answer.",
+                answer=f"⚠️ {T(lang, 'error_processing')}",
                 entities={},
                 data=None,
-                actions=[ActionLink(label="See Help", route="/chat", icon="MessageSquare")],
+                actions=[ActionLink(label=T(lang, "see_help"), route="/chat", icon="MessageSquare")],
                 mode="OFFLINE",
             )
 

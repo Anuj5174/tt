@@ -9,11 +9,12 @@ from sqlalchemy.orm import Session
 
 
 # ── Tiger ID patterns ──────────────────────────────────────────────────────────
-# Matches: "PTR-T01", "T-01", "T01", "tiger 1", "tiger 01", "t1", "tiger T01"
+# Matches: "PTR-T01", "T-01", "T01", "T103" (real PTR IDs), "tiger 1", "tiger 01", "t1", "tiger T01"
 _TIGER_ID_PATTERNS = [
     re.compile(r'\b(PTR-T\d{1,2})\b', re.IGNORECASE),
+    re.compile(r'\b(T\d{2,3})\b', re.IGNORECASE),          # real PTR IDs: T103..T158
     re.compile(r'\bT-?(\d{1,2})\b', re.IGNORECASE),
-    re.compile(r'\btiger\s*(?:#?\s*)?(\d{1,2})\b', re.IGNORECASE),
+    re.compile(r'\btiger\s*(?:#?\s*)?(\d{1,3})\b', re.IGNORECASE),
 ]
 
 # Tiger names → IDs (loaded from DB on first call)
@@ -21,7 +22,9 @@ _TIGER_NAME_MAP: dict = {}
 
 # ── Station ID patterns ───────────────────────────────────────────────────────
 _STATION_PATTERNS = [
+    re.compile(r'\b(C\d{1,3})\b', re.IGNORECASE),          # real PTR camera GRID: C090
     re.compile(r'\b(ST-\d{1,2})\b', re.IGNORECASE),
+    re.compile(r'\bcamera\s*(?:#?\s*)?(\d{1,3})\b', re.IGNORECASE),
     re.compile(r'\bstation\s*(?:#?\s*)?(\d{1,2})\b', re.IGNORECASE),
 ]
 
@@ -74,8 +77,14 @@ def _validate_tiger_id(tiger_id: str, db: Session) -> Optional[str]:
     tiger = db.query(Tiger).filter(Tiger.tiger_id == tiger_id).first()
     if tiger:
         return tiger.tiger_id
-    # Try with PTR- prefix
-    padded = f"PTR-T{tiger_id.replace('PTR-T','').replace('T','').replace('t','').lstrip('0') or '0':>02s}"
+    # Real PTR style: bare number -> T103..T158
+    digits = tiger_id.replace('PTR-T', '').replace('T', '').replace('t', '').lstrip('0')
+    if digits:
+        tiger = db.query(Tiger).filter(Tiger.tiger_id == f"T{int(digits)}").first()
+        if tiger:
+            return tiger.tiger_id
+    # Legacy synthetic style: PTR-T01
+    padded = f"PTR-T{digits or '0':>02s}"
     tiger = db.query(Tiger).filter(Tiger.tiger_id == padded).first()
     if tiger:
         return tiger.tiger_id
@@ -84,17 +93,22 @@ def _validate_tiger_id(tiger_id: str, db: Session) -> Optional[str]:
 
 def _validate_station_id(station_id: str, db: Session) -> Optional[str]:
     """Validate and normalize a station ID against the database."""
-    from database import Capture
-    # Direct match
+    from database import CameraStation, Capture
+    # Direct match (captures)
     cap = db.query(Capture).filter(Capture.station_id == station_id).first()
     if cap:
         return cap.station_id
-    # Try with ST- prefix
-    num = station_id.replace('ST-', '').replace('st-', '').lstrip('0') or '0'
-    padded = f"ST-{int(num):02d}"
-    cap = db.query(Capture).filter(Capture.station_id == padded).first()
-    if cap:
-        return padded
+    # Real PTR camera GRID: bare number -> C090 (checked against survey table)
+    num = re.sub(r'[^0-9]', '', station_id).lstrip('0')
+    if num:
+        st = db.query(CameraStation).filter(CameraStation.grid_id == int(num)).first()
+        if st:
+            return st.station_id
+        # Legacy synthetic style: ST-01
+        padded = f"ST-{int(num):02d}"
+        cap = db.query(Capture).filter(Capture.station_id == padded).first()
+        if cap:
+            return padded
     return None
 
 

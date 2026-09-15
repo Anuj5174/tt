@@ -32,7 +32,7 @@ export default function LewaNav({ forceScrolled }: LewaNavProps = {}) {
         <Link href="/identification" className="btn-brush">
           {t.nav_identify_tiger}
         </Link>
-        <Link href="/#wildlife" className="lewa-nav-link active">
+        <Link href="/showcase#wildlife" className="lewa-nav-link active">
           {t.nav_tiger_habitat}
         </Link>
         <Link href="/patrol" className="lewa-nav-link" style={{ color: "var(--lewa-terracotta)", fontWeight: 600 }}>
@@ -51,14 +51,14 @@ export default function LewaNav({ forceScrolled }: LewaNavProps = {}) {
         <Link href="/chat" className="lewa-nav-link">
           {t.nav_ai_assistant}
         </Link>
+        <Link href="/insights" className="lewa-nav-link">
+          {t.nav_insights}
+        </Link>
         <Link href="/map" className="lewa-nav-link">
           {t.nav_territory}
         </Link>
         <Link href="/alerts" className="lewa-nav-link">
           {t.nav_alerts}
-        </Link>
-        <Link href="/triage" className="lewa-nav-link">
-          {t.nav_triage}
         </Link>
         <LanguageSelector variant={isScrolled ? "dark" : "light"} />
       </div>

@@ -40,6 +40,7 @@ class Intent(str, Enum):
 class ChatRequest(BaseModel):
     """Incoming chat message from the frontend."""
     message: str = Field(..., min_length=1, max_length=1000)
+    language: str = Field(default="en", pattern="^(en|hi|mr)$")
 
 
 class ActionLink(BaseModel):

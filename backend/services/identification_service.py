@@ -47,32 +47,53 @@ def _build_pench_gallery():
     global _pench_gallery
     _pench_gallery = {}
 
-    # 1. Real embeddings stored in SQLite
+    # 1. Real embeddings stored in SQLite.
+    #    Each tiger may carry TWO centroids: embedding_json (full-image average)
+    #    and embedding2_json (MegaDetector-crop average) — PTR curated photos
+    #    match best as full frames while SD-card scene photos match best as
+    #    crops, so queries score against both.
     try:
         from database import SessionLocal, Tiger
 
         db_session = SessionLocal()
         try:
             for t in db_session.query(Tiger).all():
-                if t.embedding_json:
-                    vec = np.array(json.loads(t.embedding_json), dtype=np.float32)
-                    norm = np.linalg.norm(vec)
-                    if norm > 1e-8:
-                        _pench_gallery[t.tiger_id] = vec / norm
+                vecs = []
+                for col in (t.embedding_json, t.embedding2_json):
+                    if not col:
+                        continue
+                    try:
+                        vec = np.array(json.loads(col), dtype=np.float32)
+                        norm = np.linalg.norm(vec)
+                        if norm > 1e-8:
+                            vecs.append(vec / norm)
+                    except Exception:
+                        continue
+                if vecs:
+                    _pench_gallery[t.tiger_id] = vecs
         finally:
             db_session.close()
     except Exception as e_db:
         print(f"[WARN] Unable to load DB tiger embeddings: {e_db}")
 
-    # 2. Deterministic fallbacks so the gallery is never empty
-    for idx, tiger in enumerate(KNOWN_TIGERS):
-        tid = tiger["tiger_id"]
-        if tid not in _pench_gallery:
+    # 2. Deterministic fallbacks ONLY when the database has no real tigers
+    #    (random vectors must never compete with real gallery entries)
+    if not _pench_gallery:
+        for idx, tiger in enumerate(KNOWN_TIGERS):
+            tid = tiger["tiger_id"]
             rng = np.random.default_rng(42 + idx * 7)
             vec = rng.standard_normal(256).astype(np.float32)
-            _pench_gallery[tid] = vec / np.linalg.norm(vec)
+            _pench_gallery[tid] = [vec / np.linalg.norm(vec)]
 
-    print(f"[INFO] Pench Gallery populated with {len(_pench_gallery)} registered individuals ({list(_pench_gallery.keys())}).")
+    print(f"[INFO] Pench Gallery populated with {len(_pench_gallery)} registered individuals "
+          f"({sum(len(v) for v in _pench_gallery.values())} centroids).")
+
+
+def gallery_best_cosines(q_norm) -> np.ndarray:
+    """Best cosine similarity per registered tiger across all its centroids."""
+    ids = list(_pench_gallery.keys())
+    best = [max(float(np.dot(v, q_norm)) for v in _pench_gallery[tid]) for tid in ids]
+    return np.array(best, dtype=np.float32), ids
 
 
 def enroll_tiger_embedding(tiger_id: str, vec) -> bool:
@@ -118,6 +139,44 @@ def mock_identify(image_path: str) -> dict:
     }
 
 
+def detect_crop(image_path: str):
+    """
+    MegaDetector animal check + crop. Returns (has_animal, confidence, cropped_path).
+    The crop is written next to the uploads so the species gate and Re-ID see the
+    same tightened region the detector found (full uncropped scenes confuse both).
+    """
+    from services.triage_service import detect_animal
+
+    has_animal, confidence = detect_animal(image_path)
+    if not has_animal:
+        return False, confidence, None
+
+    cropped_path = image_path
+    try:
+        from src.detection.mdv6_inference import MDV6Detector  # noqa: F401
+        from services.triage_service import get_mdv6
+
+        mdv6 = get_mdv6()
+        if mdv6 is not None:
+            import cv2
+
+            detections, _inf_ms, img_bgr = mdv6.detect_image(image_path, conf_thresh=0.20)
+            animals = [d for d in detections if d["class_name"] == "animal"]
+            if animals:
+                best = max(animals, key=lambda d: d["confidence"])
+                x1, y1, x2, y2 = [int(v) for v in best["bbox"]]
+                h, w = img_bgr.shape[:2]
+                crop = img_bgr[max(0, y1):min(h, y2), max(0, x1):min(w, x2)]
+                if crop.size:
+                    root, ext = os.path.splitext(image_path)
+                    cropped_path = f"{root}_crop{ext or '.jpg'}"
+                    cv2.imwrite(cropped_path, crop)
+    except Exception as e:
+        print(f"[WARN] detect_crop falling back to full image: {e}")
+
+    return True, confidence, cropped_path
+
+
 def identify_tiger(image_path: str, db=None) -> dict:
     """
     Complete computer vision pipeline (ONNX, thread-safe, blocking — call via threadpool):
@@ -143,15 +202,12 @@ def identify_tiger(image_path: str, db=None) -> dict:
             "all_scores": [],
         }
 
-    # 2+3. Cosine similarity against all registered Pench tigers
-    gallery_ids = list(_pench_gallery.keys())
-    gallery_matrix = np.array([_pench_gallery[tid] for tid in gallery_ids])
-
-    cosine_sims = (gallery_matrix @ q_norm).flatten()
+    # 2+3. Cosine similarity against all registered Pench tigers (multi-centroid)
+    best_cos, gallery_ids = gallery_best_cosines(q_norm)
 
     # Softmax temperature calibration
     temperature = 18.0
-    exp_sims = np.exp(cosine_sims * temperature)
+    exp_sims = np.exp(best_cos * temperature)
     conf_probs = exp_sims / np.sum(exp_sims)
 
     scores = {tid: round(float(prob), 3) for tid, prob in zip(gallery_ids, conf_probs)}

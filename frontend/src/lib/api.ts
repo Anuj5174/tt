@@ -1,4 +1,26 @@
-export const API_BASE = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000").replace(/\/+$/, "");
+// Backend base URL resolution:
+// 1. localStorage override (set from the app's Server Settings screen — lets the
+//    Android APK point at the deployed machine even if its LAN IP changes)
+// 2. NEXT_PUBLIC_API_URL build-time override
+// 3. http://localhost:8000 default (dev on the same machine)
+export function getApiBase(): string {
+  if (typeof window !== "undefined") {
+    try {
+      const saved = window.localStorage.getItem("tigertrace_server_url");
+      if (saved && saved.trim()) return saved.trim().replace(/\/+$/, "");
+    } catch { /* storage unavailable */ }
+  }
+  return (process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000").replace(/\/+$/, "");
+}
+
+export function setApiBase(url: string): void {
+  if (typeof window === "undefined") return;
+  const clean = url.trim().replace(/\/+$/, "");
+  if (clean) window.localStorage.setItem("tigertrace_server_url", clean);
+  else window.localStorage.removeItem("tigertrace_server_url");
+}
+
+export const API_BASE = getApiBase();
 
 async function fetchAPI<T>(endpoint: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${endpoint}`, {
@@ -53,11 +75,119 @@ export async function getTriageHistory() {
   >("/api/triage/history");
 }
 
+// SD-Card Ingestion
+export interface PendingCard {
+  mount: string;
+  label: string;
+  fs_type: string;
+  image_count: number;
+  video_count: number;
+  total_mb: number;
+  detected_at: string;
+}
+
+export interface IngestJobProgress {
+  job_id: string;
+  station_id: string;
+  mount: string;
+  started_at: string;
+  finished_at: string | null;
+  stage: "copying" | "triaging" | "done" | "error";
+  total_files: number;
+  copied_files: number;
+  skipped_files: number;
+  blank_files: number;
+  retained_files: number;
+  saved_mb: number;
+  error: string | null;
+}
+
+export interface IngestBatchRecord {
+  id: number;
+  job_id: string;
+  station_id: string;
+  started_at: string;
+  total_files: number;
+  copied_files: number;
+  skipped_duplicates: number;
+  blanks: number;
+  retained: number;
+  saved_mb: number;
+}
+
+export interface IngestStatus {
+  pending_cards: PendingCard[];
+  active_job: IngestJobProgress | null;
+  recent_batches: IngestBatchRecord[];
+}
+
+export interface CameraStationInfo {
+  station_id: string;
+  grid_id: number;
+  block: string;
+  beat: string;
+  range: string;
+  latitude: number;
+  longitude: number;
+}
+
+export async function getCameraStations(): Promise<CameraStationInfo[]> {
+  return fetchAPI<CameraStationInfo[]>("/api/stations");
+}
+
+export async function getIngestStatus(): Promise<IngestStatus> {
+  return fetchAPI<IngestStatus>("/api/ingest/status");
+}
+
+export async function getIngestStations(): Promise<{ stations: string[] }> {
+  return fetchAPI<{ stations: string[] }>("/api/ingest/stations");
+}
+
+export async function startIngest(mount: string, stationId: string): Promise<IngestJobProgress> {
+  const params = new URLSearchParams({ mount, station_id: stationId });
+  return fetchAPI<IngestJobProgress>(`/api/ingest/start?${params}`, { method: "POST" });
+}
+
 // Identification
 export async function identifyTiger(file: File) {
   const formData = new FormData();
   formData.append("file", file);
   const res = await fetch(`${API_BASE}/api/identify`, {
+    method: "POST",
+    body: formData,
+  });
+  if (!res.ok) throw new Error(`API error: ${res.status}`);
+  return res.json();
+}
+
+// Unified demo pipeline — one upload, all four stages in one response
+export interface PipelineStages {
+  blank_filter?: { has_animal: boolean; confidence: number };
+  species_gate?: { tiger_probability: number; is_tiger: boolean };
+  stripe_reid?: { embedding_dim: number; top_similarity: number };
+  classification?: { category: string; tiger_id: string | null; confidence: number };
+}
+
+export interface PipelineResult {
+  filename: string;
+  image_url: string;
+  stages: PipelineStages;
+  final: {
+    outcome: "matched" | "review" | "new_tiger" | "blank" | "not_a_tiger";
+    tiger_id: string | null;
+    name: string | null;
+    sex: string | null;
+    confidence: number | null;
+    review_item_id: number | null;
+    all_scores: Array<{ tiger_id: string; confidence: number }>;
+  };
+}
+
+export async function analyzePipeline(file: File, stationId = "ST-01"): Promise<PipelineResult> {
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("station_id", stationId);
+  const res = await fetch(`${API_BASE}/api/pipeline/analyze`, {
     method: "POST",
     body: formData,
   });
@@ -146,6 +276,26 @@ export async function getOverlaps() {
   >("/api/geospatial/overlaps");
 }
 
+// Movement paths — time-ordered capture waypoints per tiger
+export interface PathPoint {
+  lat: number;
+  lon: number;
+  timestamp: string | null;
+  station_id: string;
+  confidence: number;
+}
+
+export interface TigerPath {
+  tiger_id: string;
+  name: string;
+  sex: string | null;
+  points: PathPoint[];
+}
+
+export async function getMovementPaths(): Promise<TigerPath[]> {
+  return fetchAPI<TigerPath[]>("/api/geospatial/paths");
+}
+
 // Alerts
 export async function getAlerts() {
   return fetchAPI<
@@ -179,17 +329,6 @@ export function getExportGeospatialUrl() {
   return `${API_BASE}/api/export/geospatial`;
 }
 
-export async function uploadVideo(file: File) {
-  const formData = new FormData();
-  formData.append("file", file);
-  const res = await fetch(`${API_BASE}/api/upload-video`, {
-    method: "POST",
-    body: formData,
-  });
-  if (!res.ok) throw new Error(`Video upload error: ${res.statusText}`);
-  return res.json();
-}
-
 // Chatbot
 export interface ChatActionLink {
   label: string;
@@ -217,11 +356,11 @@ export interface ChatHistoryMessage {
   created_at: string;
 }
 
-export async function sendChatMessage(message: string): Promise<ChatResponseData> {
+export async function sendChatMessage(message: string, language = "en"): Promise<ChatResponseData> {
   return fetchAPI<ChatResponseData>("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({ message, language }),
   });
 }
 

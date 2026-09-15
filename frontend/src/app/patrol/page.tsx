@@ -47,6 +47,19 @@ const PATROL_LEVEL_STYLE: Record<string, { bg: string; ink: string; solid?: stri
 
 const levelStyle = (level: string) => PATROL_LEVEL_STYLE[level] ?? PATROL_LEVEL_STYLE.MODERATE;
 
+// Display labels for the backend's raw priority_level strings ("CRITICAL" etc.)
+// localized per language. The API value itself is never mutated — this only
+// controls what the user sees.
+const LEVEL_LABEL: Record<string, Record<string, string>> = {
+  CRITICAL: { en: "Critical", hi: "गंभीर", mr: "गंभीर" },
+  HIGH: { en: "High", hi: "उच्च", mr: "उच्च" },
+  MODERATE: { en: "Moderate", hi: "मध्यम", mr: "मध्यम" },
+  LOW: { en: "Low", hi: "कम", mr: "कमी" },
+};
+
+const levelLabel = (level: string, language: string) =>
+  LEVEL_LABEL[level]?.[language] ?? LEVEL_LABEL[level]?.en ?? level;
+
 export default function PatrolPriorityPage() {
   const { t, language } = useLanguage();
   const [summary, setSummary] = useState<PatrolSummaryData | null>(null);
@@ -116,13 +129,7 @@ export default function PatrolPriorityPage() {
         {/* Header Title */}
         <div style={{ textAlign: "center", marginBottom: "36px" }}>
           <h1 className="lewa-title-section" style={{ fontSize: "clamp(32px, 4.5vw, 56px)" }}>
-            {language === "hi" ? (
-              <>गश्त <span className="font-italic">प्राथमिकताएं</span></>
-            ) : language === "mr" ? (
-              <>गस्त <span className="font-italic">प्राधान्यक्रम</span></>
-            ) : (
-              <>Patrol <span className="font-italic">Priorities</span></>
-            )}
+            {t.patrol_heading_1} <span className="font-italic">{t.patrol_heading_2}</span>
           </h1>
 
           <p
@@ -148,10 +155,10 @@ export default function PatrolPriorityPage() {
         >
           {(
             [
-              { key: "critical", label: t.patrol_critical, count: counts.critical, range: "stations (≥75)", note: "Immediate inspection recommended" },
-              { key: "high", label: t.patrol_high, count: counts.high, range: "stations (50–74)", note: "Elevated movement corridor" },
-              { key: "moderate", label: t.patrol_moderate, count: counts.moderate, range: "stations (25–49)", note: "Periodic monitoring sweep" },
-              { key: "low", label: t.patrol_low, count: counts.low, range: "stations (<25)", note: "Standard baseline coverage" },
+              { key: "critical", label: t.patrol_critical, count: counts.critical, range: t.patrol_range_critical, note: t.patrol_note_critical },
+              { key: "high", label: t.patrol_high, count: counts.high, range: t.patrol_range_high, note: t.patrol_note_high },
+              { key: "moderate", label: t.patrol_moderate, count: counts.moderate, range: t.patrol_range_moderate, note: t.patrol_note_moderate },
+              { key: "low", label: t.patrol_low, count: counts.low, range: t.patrol_range_low, note: t.patrol_note_low },
             ] as const
           ).map((card) => {
             const style = levelStyle(card.key.toUpperCase());
@@ -199,42 +206,42 @@ export default function PatrolPriorityPage() {
               className={filter === "all" ? "btn-brush" : "btn-pill-light"}
               style={{ padding: "5px 14px", fontSize: "11px" }}
             >
-              All Stations ({stations.length})
+              {t.patrol_filter_all} ({stations.length})
             </button>
             <button
               onClick={() => setFilter("CRITICAL")}
               className={filter === "CRITICAL" ? "btn-brush" : "btn-pill-light"}
               style={{ padding: "5px 14px", fontSize: "11px" }}
             >
-              🔴 Critical ({counts.critical})
+              🔴 {levelLabel("CRITICAL", language)} ({counts.critical})
             </button>
             <button
               onClick={() => setFilter("HIGH")}
               className={filter === "HIGH" ? "btn-brush" : "btn-pill-light"}
               style={{ padding: "5px 14px", fontSize: "11px" }}
             >
-              🟠 High ({counts.high})
+              🟠 {levelLabel("HIGH", language)} ({counts.high})
             </button>
             <button
               onClick={() => setFilter("MODERATE")}
               className={filter === "MODERATE" ? "btn-brush" : "btn-pill-light"}
               style={{ padding: "5px 14px", fontSize: "11px" }}
             >
-              🟡 Moderate ({counts.moderate})
+              🟡 {levelLabel("MODERATE", language)} ({counts.moderate})
             </button>
             <button
               onClick={() => setFilter("village")}
               className={filter === "village" ? "btn-brush" : "btn-pill-light"}
               style={{ padding: "5px 14px", fontSize: "11px" }}
             >
-              Village Adjacent
+              {t.patrol_filter_village}
             </button>
             <button
               onClick={() => setFilter("buffer")}
               className={filter === "buffer" ? "btn-brush" : "btn-pill-light"}
               style={{ padding: "5px 14px", fontSize: "11px" }}
             >
-              Buffer Zone
+              {t.zone_buffer}
             </button>
           </div>
 
@@ -245,7 +252,7 @@ export default function PatrolPriorityPage() {
               className="btn-pill-light"
               style={{ padding: "6px 14px", fontSize: "11px", display: "inline-flex", alignItems: "center", gap: "6px", textDecoration: "none" }}
             >
-              <MapPin size={13} /> View On Territory Map
+              <MapPin size={13} /> {t.patrol_view_territory_map}
             </Link>
 
             <a
@@ -254,7 +261,7 @@ export default function PatrolPriorityPage() {
               className="btn-pill-light"
               style={{ padding: "6px 14px", fontSize: "11px", display: "inline-flex", alignItems: "center", gap: "6px", textDecoration: "none" }}
             >
-              <Download size={13} /> Export Priorities CSV
+              <Download size={13} /> {t.patrol_export_priorities_csv}
             </a>
           </div>
         </div>
@@ -284,20 +291,20 @@ export default function PatrolPriorityPage() {
           >
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
               <p style={{ fontSize: "12px", fontWeight: 700, textTransform: "uppercase", letterSpacing: "1px", color: "var(--lewa-charcoal)" }}>
-                Ranked Patrol Stations ({filteredStations.length})
+                {t.patrol_ranked_stations} ({filteredStations.length})
               </p>
               <span style={{ fontSize: "11px", color: "var(--lewa-muted)" }}>
-                Click to inspect factor evidence
+                {t.patrol_click_inspect}
               </span>
             </div>
 
             {loading ? (
               <div style={{ textAlign: "center", padding: "40px 0", color: "var(--lewa-muted)" }}>
-                Calculating station patrol scores...
+                {t.patrol_calculating}
               </div>
             ) : filteredStations.length === 0 ? (
               <div style={{ textAlign: "center", padding: "40px 0", color: "var(--lewa-muted)" }}>
-                No stations match selected filter.
+                {t.patrol_no_match}
               </div>
             ) : (
               filteredStations.map((st, index) => {
@@ -336,7 +343,7 @@ export default function PatrolPriorityPage() {
                             letterSpacing: "0.5px",
                           }}
                         >
-                          {st.priority_level}
+                          {levelLabel(st.priority_level, language)}
                         </span>
                         <span style={{ fontSize: "16px", fontWeight: 700, color: "var(--lewa-charcoal)" }}>
                           {st.station_id}
@@ -352,7 +359,7 @@ export default function PatrolPriorityPage() {
                               fontWeight: 600,
                             }}
                           >
-                            Village Interface
+                            {t.zone_interface}
                           </span>
                         )}
                       </div>
@@ -367,9 +374,9 @@ export default function PatrolPriorityPage() {
 
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "8px", fontSize: "11.5px", color: "var(--lewa-muted)" }}>
                       <span>
-                        {st.total_captures} captures • {st.unique_tigers_count} tiger(s) • {st.zone} zone
+                        {st.total_captures} {t.patrol_captures_unit} • {st.unique_tigers_count} {t.patrol_tigers_unit} • {st.zone} {t.patrol_zone_word}
                       </span>
-                      <span>Confidence: {st.evidence_confidence}%</span>
+                      <span>{t.patrol_confidence_label} {st.evidence_confidence}%</span>
                     </div>
 
                     {/* Progress score bar */}
@@ -430,7 +437,7 @@ export default function PatrolPriorityPage() {
                       <div>
                         <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
                           <h2 style={{ fontSize: "28px", fontWeight: 700, color: "var(--lewa-charcoal)", margin: 0 }}>
-                            Station {selectedStation.station_id}
+                            {t.patrol_station_prefix} {selectedStation.station_id}
                           </h2>
                           <span
                             style={{
@@ -447,14 +454,14 @@ export default function PatrolPriorityPage() {
                             }}
                           >
                             <span style={{ width: "6px", height: "6px", borderRadius: "50%", background: isCritical ? "var(--lewa-cream)" : selStyle.ink }} />
-                            {selectedStation.badge_icon} {selectedStation.priority_level} PRIORITY
+                            {selectedStation.badge_icon} {levelLabel(selectedStation.priority_level, language)} {t.patrol_priority_word}
                           </span>
                         </div>
 
                         <p style={{ color: "var(--lewa-muted)", fontSize: "13px", marginTop: "4px" }}>
-                          Coordinates: {selectedStation.latitude.toFixed(4)}°N, {selectedStation.longitude.toFixed(4)}°E • Zone:{" "}
+                          {t.patrol_coordinates_label} {selectedStation.latitude.toFixed(4)}°N, {selectedStation.longitude.toFixed(4)}°E • {t.patrol_zone_label}{" "}
                           <strong>{selectedStation.zone.toUpperCase()}</strong>
-                          {selectedStation.is_village_adjacent ? " • Village Boundary Interface" : ""}
+                          {selectedStation.is_village_adjacent ? ` • ${t.patrol_village_boundary}` : ""}
                         </p>
                       </div>
 
@@ -464,7 +471,7 @@ export default function PatrolPriorityPage() {
                           <span style={{ fontSize: "16px", color: "var(--lewa-muted)", fontWeight: 500 }}>/100</span>
                         </div>
                         <span style={{ fontSize: "11px", color: "var(--lewa-muted)" }}>
-                          Evidence Confidence: <strong>{selectedStation.evidence_confidence}%</strong>
+                          {t.patrol_evidence_confidence} <strong>{selectedStation.evidence_confidence}%</strong>
                         </span>
                       </div>
                     </>
@@ -482,7 +489,7 @@ export default function PatrolPriorityPage() {
                 }}
               >
                 <p style={{ fontSize: "11px", fontWeight: 700, textTransform: "uppercase", letterSpacing: "1px", color: "var(--lewa-terracotta)", marginBottom: "6px" }}>
-                  Deterministic Priority Rationale
+                  {t.patrol_rationale_heading}
                 </p>
                 <p style={{ fontSize: "14px", lineHeight: 1.5, color: "var(--lewa-body)" }}>
                   {selectedStation.why_explanation}
@@ -492,7 +499,7 @@ export default function PatrolPriorityPage() {
               {/* Factor Breakdown Contributions */}
               <div>
                 <p style={{ fontSize: "12px", fontWeight: 700, textTransform: "uppercase", letterSpacing: "1px", color: "var(--lewa-charcoal)", marginBottom: "14px" }}>
-                  Transparent Scoring Breakdown
+                  {t.patrol_factor_breakdown}
                 </p>
 
                 <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
@@ -500,12 +507,12 @@ export default function PatrolPriorityPage() {
                   <div style={{ background: "var(--lewa-ivory)", padding: "14px 16px", borderRadius: "10px", border: "1px solid var(--lewa-border)" }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
                       <span style={{ fontSize: "13.5px", fontWeight: 600, color: "var(--lewa-charcoal)" }}>
-                        Tiger Movement Activity
+                        {t.patrol_factor_movement}
                       </span>
                       <span style={{ fontSize: "13px", fontWeight: 700, color: "var(--lewa-charcoal)" }}>
                         {selectedStation.components.movement.score}/100{" "}
                         <span style={{ color: "var(--lewa-terracotta)", fontSize: "12px" }}>
-                          (+{selectedStation.components.movement.contribution} pts)
+                          (+{selectedStation.components.movement.contribution} {t.patrol_pts})
                         </span>
                       </span>
                     </div>
@@ -520,12 +527,12 @@ export default function PatrolPriorityPage() {
                   <div style={{ background: "var(--lewa-ivory)", padding: "14px 16px", borderRadius: "10px", border: "1px solid var(--lewa-border)" }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
                       <span style={{ fontSize: "13.5px", fontWeight: 600, color: "var(--lewa-charcoal)" }}>
-                        Conflict & Buffer Proximity
+                        {t.patrol_factor_conflict}
                       </span>
                       <span style={{ fontSize: "13px", fontWeight: 700, color: "var(--lewa-charcoal)" }}>
                         {selectedStation.components.conflict.score}/100{" "}
                         <span style={{ color: "var(--lewa-terracotta)", fontSize: "12px" }}>
-                          (+{selectedStation.components.conflict.contribution} pts)
+                          (+{selectedStation.components.conflict.contribution} {t.patrol_pts})
                         </span>
                       </span>
                     </div>
@@ -540,12 +547,12 @@ export default function PatrolPriorityPage() {
                   <div style={{ background: "var(--lewa-ivory)", padding: "14px 16px", borderRadius: "10px", border: "1px solid var(--lewa-border)" }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
                       <span style={{ fontSize: "13.5px", fontWeight: 600, color: "var(--lewa-charcoal)" }}>
-                        Spatial Anomalies & Alerts
+                        {t.patrol_factor_anomaly}
                       </span>
                       <span style={{ fontSize: "13px", fontWeight: 700, color: "var(--lewa-charcoal)" }}>
                         {selectedStation.components.anomaly.score}/100{" "}
                         <span style={{ color: "var(--lewa-terracotta)", fontSize: "12px" }}>
-                          (+{selectedStation.components.anomaly.contribution} pts)
+                          (+{selectedStation.components.anomaly.contribution} {t.patrol_pts})
                         </span>
                       </span>
                     </div>
@@ -562,12 +569,12 @@ export default function PatrolPriorityPage() {
               {selectedStation.contributing_tigers.length > 0 && (
                 <div>
                   <p style={{ fontSize: "12px", fontWeight: 700, textTransform: "uppercase", letterSpacing: "1px", color: "var(--lewa-charcoal)", marginBottom: "10px" }}>
-                    Contributing Individual Tigers ({selectedStation.contributing_tigers.length})
+                    {t.patrol_contributing_tigers} ({selectedStation.contributing_tigers.length})
                   </p>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "10px" }}>
-                    {selectedStation.contributing_tigers.map((t) => (
+                    {selectedStation.contributing_tigers.map((tiger) => (
                       <div
-                        key={t.tiger_id}
+                        key={tiger.tiger_id}
                         style={{
                           padding: "10px 14px",
                           background: "var(--lewa-paper)",
@@ -576,9 +583,9 @@ export default function PatrolPriorityPage() {
                           fontSize: "12px",
                         }}
                       >
-                        <strong style={{ color: "var(--lewa-charcoal)" }}>{t.name}</strong> ({t.tiger_id})
+                        <strong style={{ color: "var(--lewa-charcoal)" }}>{tiger.name}</strong> ({tiger.tiger_id})
                         <div style={{ color: "var(--lewa-muted)", marginTop: "2px" }}>
-                          {t.captures_at_station} capture(s) at this station
+                          {tiger.captures_at_station} {t.patrol_captures_at_station}
                         </div>
                       </div>
                     ))}
@@ -589,7 +596,7 @@ export default function PatrolPriorityPage() {
               {/* Multi-Cycle Trajectory Trend */}
               <div>
                 <p style={{ fontSize: "12px", fontWeight: 700, textTransform: "uppercase", letterSpacing: "1px", color: "var(--lewa-charcoal)", marginBottom: "10px" }}>
-                  Multi-Cycle Priority Trajectory
+                  {t.patrol_trajectory_heading}
                 </p>
                 <div style={{ display: "flex", gap: "8px", alignItems: "flex-end", height: "80px", padding: "10px 0" }}>
                   {selectedStation.cycle_trend.map((c, idx) => (
@@ -623,7 +630,7 @@ export default function PatrolPriorityPage() {
                     textDecoration: "none",
                   }}
                 >
-                  <MapPin size={13} /> View on Territory Map
+                  <MapPin size={13} /> {t.patrol_view_territory_map}
                 </Link>
 
                 <Link
@@ -638,13 +645,13 @@ export default function PatrolPriorityPage() {
                     textDecoration: "none",
                   }}
                 >
-                  <MessageSquare size={13} /> Ask Assistant About {selectedStation.station_id}
+                  <MessageSquare size={13} /> {t.patrol_ask_assistant} {selectedStation.station_id}
                 </Link>
               </div>
             </div>
           ) : (
             <div style={{ padding: "40px", textAlign: "center", color: "var(--lewa-muted)" }}>
-              Select a station from the left column to inspect its scoring factors.
+              {t.patrol_select_station_empty}
             </div>
           )}
         </div>
@@ -662,10 +669,10 @@ export default function PatrolPriorityPage() {
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "18px" }}>
             <div>
               <p style={{ fontSize: "11px", fontWeight: 700, textTransform: "uppercase", letterSpacing: "1.5px", color: "var(--lewa-terracotta)" }}>
-                Operational Deployment Itinerary
+                {t.patrol_sequence_badge}
               </p>
               <h2 style={{ fontSize: "24px", fontWeight: 700, color: "var(--lewa-charcoal)", margin: "4px 0 0" }}>
-                Suggested Tactical Patrol Sequence
+                {t.patrol_sequence_heading}
               </h2>
             </div>
             <Link
@@ -673,7 +680,7 @@ export default function PatrolPriorityPage() {
               className="btn-pill-light"
               style={{ padding: "6px 14px", fontSize: "11px", display: "inline-flex", alignItems: "center", gap: "6px", textDecoration: "none" }}
             >
-              <Compass size={13} /> Trace On Map
+              <Compass size={13} /> {t.patrol_trace_on_map}
             </Link>
           </div>
 
@@ -724,11 +731,11 @@ export default function PatrolPriorityPage() {
                 </div>
 
                 <p style={{ fontSize: "12px", color: "var(--lewa-muted)", margin: 0, lineHeight: 1.4 }}>
-                  <strong>Objective:</strong> {item.tactical_objective}
+                  <strong>{t.patrol_objective_label}</strong> {item.tactical_objective}
                 </p>
 
                 <div style={{ fontSize: "11px", color: "var(--lewa-light)", marginTop: "4px" }}>
-                  Zone: {item.zone.toUpperCase()}{item.is_village_adjacent ? " (Village Fringe)" : ""}
+                  {t.patrol_zone_label} {item.zone.toUpperCase()}{item.is_village_adjacent ? ` (${t.patrol_village_fringe})` : ""}
                 </div>
               </div>
             ))}
