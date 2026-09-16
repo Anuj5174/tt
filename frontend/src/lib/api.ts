@@ -20,7 +20,7 @@ export function getApiBase(): string {
       }
     } catch { /* storage unavailable */ }
   }
-  return (process.env.NEXT_PUBLIC_API_URL ?? "").replace(/\/+$/, "");
+  return (process.env.NEXT_PUBLIC_API_URL || "https://tt-production-faeb.up.railway.app").replace(/\/+$/, "");
 }
 
 export function setApiBase(url: string): void {
