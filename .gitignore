@@ -34,7 +34,9 @@ out/
 # Data files & large datasets
 # ─────────────────────────────────────────────────────────
 data/
-backend/data/*.db
+!data/pench_ai.db
+!data/ptr_camera_locations.json
+!data/ptr_dataset.json
 backend/data/images/temp_images.jpg
 backend/data/images/test.jpg
 backend/data/images/retained_images/
