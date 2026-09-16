@@ -8,13 +8,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
-COPY requirements.txt requirements.txt
+COPY backend/requirements.txt requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
-COPY . .
+# Copy backend code into container
+COPY backend/ .
 
-# Ensure data directory exists
+# Ensure data directories exist
 RUN mkdir -p data/images data/quarantined_blanks
 
 EXPOSE 8000
