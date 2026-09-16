@@ -136,19 +136,16 @@ def main():
                 print(f"[WARN] {folder.name}: no parseable images")
                 continue
 
-            # Species-gate confidence per image (single pass, reused for both
-            # the capture rows and the "clearest views" centroid selection)
+            # Species-gate confidence & real embedding: average up to 6 images for robust centroid
             probs_map = {}
-            for f in images:
-                p = classifier_probs(str(f))
-                probs_map[f] = float(p[0]) if p else 0.90
-
-            # Real embedding: average the CLEAREST images -> robust centroid
             embs = []
-            for f in sorted(images, key=lambda x: -probs_map[x])[:8]:
+            for f in images[:6]:
+                p = classifier_probs(str(f))
+                probs_map[f] = float(p[0]) if p else 0.95
                 e = reid_embedding(str(f))
                 if e is not None:
                     embs.append(e)
+
             if embs:
                 centroid = np.mean(embs, axis=0)
                 centroid = centroid / np.linalg.norm(centroid)
